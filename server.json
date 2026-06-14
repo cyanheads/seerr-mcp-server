@@ -1,0 +1,137 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.cyanheads/seerr-mcp-server",
+  "description": "Search Jellyseerr/Overseerr, check availability, and create guarded media requests.",
+  "repository": {
+    "url": "https://github.com/cyanheads/seerr-mcp-server",
+    "source": "github"
+  },
+  "version": "0.1.0",
+  "packages": [
+    {
+      "registryType": "npm",
+      "registryBaseUrl": "https://registry.npmjs.org",
+      "identifier": "@cyanheads/seerr-mcp-server",
+      "runtimeHint": "bun",
+      "version": "0.1.0",
+      "packageArguments": [
+        {
+          "type": "positional",
+          "value": "run"
+        },
+        {
+          "type": "positional",
+          "value": "start:stdio"
+        }
+      ],
+      "environmentVariables": [
+        {
+          "name": "SEERR_BASE_URL",
+          "description": "Base URL of the Jellyseerr/Overseerr instance, e.g. http://host:5055. No /api/v1 suffix, no trailing slash.",
+          "format": "string",
+          "isRequired": true
+        },
+        {
+          "name": "SEERR_API_KEY",
+          "description": "Seerr API key (Settings → General → API Key), sent as the X-Api-Key header.",
+          "format": "string",
+          "isRequired": true
+        },
+        {
+          "name": "SEERR_REQUEST_TIMEOUT_MS",
+          "description": "Per-request HTTP timeout in milliseconds.",
+          "format": "string",
+          "isRequired": false,
+          "default": "15000"
+        },
+        {
+          "name": "MCP_LOG_LEVEL",
+          "description": "Sets the minimum log level for output (e.g., 'debug', 'info', 'warn').",
+          "format": "string",
+          "isRequired": false,
+          "default": "info"
+        }
+      ],
+      "transport": {
+        "type": "stdio"
+      }
+    },
+    {
+      "registryType": "npm",
+      "registryBaseUrl": "https://registry.npmjs.org",
+      "identifier": "@cyanheads/seerr-mcp-server",
+      "runtimeHint": "bun",
+      "version": "0.1.0",
+      "packageArguments": [
+        {
+          "type": "positional",
+          "value": "run"
+        },
+        {
+          "type": "positional",
+          "value": "start:http"
+        }
+      ],
+      "environmentVariables": [
+        {
+          "name": "SEERR_BASE_URL",
+          "description": "Base URL of the Jellyseerr/Overseerr instance, e.g. http://host:5055. No /api/v1 suffix, no trailing slash.",
+          "format": "string",
+          "isRequired": true
+        },
+        {
+          "name": "SEERR_API_KEY",
+          "description": "Seerr API key (Settings → General → API Key), sent as the X-Api-Key header.",
+          "format": "string",
+          "isRequired": true
+        },
+        {
+          "name": "SEERR_REQUEST_TIMEOUT_MS",
+          "description": "Per-request HTTP timeout in milliseconds.",
+          "format": "string",
+          "isRequired": false,
+          "default": "15000"
+        },
+        {
+          "name": "MCP_HTTP_HOST",
+          "description": "The hostname for the HTTP server.",
+          "format": "string",
+          "isRequired": false,
+          "default": "127.0.0.1"
+        },
+        {
+          "name": "MCP_HTTP_PORT",
+          "description": "The port to run the HTTP server on.",
+          "format": "string",
+          "isRequired": false,
+          "default": "3010"
+        },
+        {
+          "name": "MCP_HTTP_ENDPOINT_PATH",
+          "description": "The endpoint path for the MCP server.",
+          "format": "string",
+          "isRequired": false,
+          "default": "/mcp"
+        },
+        {
+          "name": "MCP_AUTH_MODE",
+          "description": "Authentication mode to use: 'none', 'jwt', or 'oauth'.",
+          "format": "string",
+          "isRequired": false,
+          "default": "none"
+        },
+        {
+          "name": "MCP_LOG_LEVEL",
+          "description": "Sets the minimum log level for output (e.g., 'debug', 'info', 'warn').",
+          "format": "string",
+          "isRequired": false,
+          "default": "info"
+        }
+      ],
+      "transport": {
+        "type": "streamable-http",
+        "url": "http://localhost:3010/mcp"
+      }
+    }
+  ]
+}

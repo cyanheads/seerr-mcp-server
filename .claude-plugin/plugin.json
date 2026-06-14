@@ -1,0 +1,22 @@
+{
+  "name": "seerr-mcp-server",
+  "version": "0.1.0",
+  "description": "Search Jellyseerr/Overseerr, check availability, and create guarded media requests.",
+  "author": {
+    "name": "cyanheads"
+  },
+  "homepage": "https://github.com/cyanheads/seerr-mcp-server#readme",
+  "repository": "https://github.com/cyanheads/seerr-mcp-server",
+  "license": "Apache-2.0",
+  "mcpServers": {
+    "seerr-mcp-server": {
+      "command": "npx",
+      "args": ["-y", "@cyanheads/seerr-mcp-server"],
+      "env": {
+        "MCP_TRANSPORT_TYPE": "stdio",
+        "SEERR_BASE_URL": "",
+        "SEERR_API_KEY": ""
+      }
+    }
+  }
+}

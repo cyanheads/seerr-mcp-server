@@ -1,0 +1,58 @@
+{
+  "manifest_version": "0.3",
+  "name": "seerr-mcp-server",
+  "version": "0.1.0",
+  "description": "Search Jellyseerr/Overseerr, check availability, and create guarded media requests.",
+  "author": {
+    "name": "cyanheads"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/cyanheads/seerr-mcp-server"
+  },
+  "homepage": "https://github.com/cyanheads/seerr-mcp-server#readme",
+  "license": "Apache-2.0",
+  "server": {
+    "type": "node",
+    "entry_point": "dist/index.js",
+    "mcp_config": {
+      "command": "node",
+      "args": ["${__dirname}/dist/index.js"],
+      "env": {
+        "MCP_TRANSPORT_TYPE": "stdio",
+        "MCP_AUTH_MODE": "none",
+        "NODE_ENV": "production",
+        "SEERR_BASE_URL": "${user_config.seerr_base_url}",
+        "SEERR_API_KEY": "${user_config.seerr_api_key}",
+        "SEERR_REQUEST_TIMEOUT_MS": "${user_config.seerr_request_timeout_ms}"
+      }
+    }
+  },
+  "compatibility": {
+    "runtimes": { "node": ">=24.0.0" }
+  },
+  "tools_generated": true,
+  "prompts_generated": false,
+  "user_config": {
+    "seerr_base_url": {
+      "type": "string",
+      "title": "Seerr Base URL",
+      "description": "Base URL of the Jellyseerr/Overseerr instance, e.g. http://host:5055. No /api/v1 suffix, no trailing slash.",
+      "required": true
+    },
+    "seerr_api_key": {
+      "type": "string",
+      "title": "Seerr API Key",
+      "description": "Seerr API key (Settings → General → API Key), sent as the X-Api-Key header.",
+      "required": true,
+      "sensitive": true
+    },
+    "seerr_request_timeout_ms": {
+      "type": "string",
+      "title": "Request Timeout (ms)",
+      "description": "Per-request HTTP timeout in milliseconds.",
+      "required": false,
+      "default": "15000"
+    }
+  }
+}
