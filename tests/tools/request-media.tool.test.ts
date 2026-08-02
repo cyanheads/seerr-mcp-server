@@ -190,6 +190,80 @@ describe('seerr_request_media — local validation before any write', () => {
     expect(service.createRequest).not.toHaveBeenCalled();
   });
 
+  it('rejects season 0 when the instance has special episodes disabled', async () => {
+    const ctx = createMockContext({ tenantId: 'test', errors: requestMediaTool.errors });
+    const input = requestMediaTool.input.parse({
+      mediaType: 'tv',
+      tmdbId: 1399,
+      mode: 'request',
+      seasons: [0, 1],
+    });
+    await expect(requestMediaTool.handler(input, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.InvalidParams,
+      data: {
+        reason: 'special_episodes_not_enabled',
+        recovery: { hint: expect.stringContaining('seerr_service_options') },
+      },
+    });
+    expect(service.createRequest).not.toHaveBeenCalled();
+  });
+
+  it('accepts season 0 when the instance enables special episodes', async () => {
+    service.getPublicSettings.mockResolvedValue({ ...settings, enableSpecialEpisodes: true });
+    const ctx = createMockContext({ tenantId: 'test', errors: requestMediaTool.errors });
+    const input = requestMediaTool.input.parse({
+      mediaType: 'tv',
+      tmdbId: 1399,
+      seasons: [0, 1],
+    });
+    const result = await requestMediaTool.handler(input, ctx);
+    expect(result.payload.seasons).toEqual([0, 1]);
+  });
+
+  it('accepts seasons:[0] at the input schema (the gate is the handler, not the schema)', () => {
+    expect(() =>
+      requestMediaTool.input.parse({ mediaType: 'tv', tmdbId: 1399, seasons: [0] }),
+    ).not.toThrow();
+  });
+
+  /**
+   * The schema no longer rejects season 0, so the handler gate is the only thing
+   * standing between `[0]` and the upstream payload — it has to fire on the preview
+   * arm too, not just the arm that writes.
+   */
+  it('rejects season 0 on the preview arm as well as the request arm', async () => {
+    const ctx = createMockContext({ tenantId: 'test', errors: requestMediaTool.errors });
+    const input = requestMediaTool.input.parse({
+      mediaType: 'tv',
+      tmdbId: 1399,
+      mode: 'preview',
+      seasons: [0],
+    });
+    await expect(requestMediaTool.handler(input, ctx)).rejects.toMatchObject({
+      data: { reason: 'special_episodes_not_enabled' },
+    });
+  });
+
+  /**
+   * `seasons` is documented as ignored for movies and `buildPayload` drops it, so a
+   * movie carrying one must not trip a season constraint it cannot violate.
+   */
+  it('ignores a season list on a movie instead of raising a season constraint', async () => {
+    service.getPublicSettings.mockResolvedValue({
+      ...settings,
+      partialRequestsEnabled: false,
+      enableSpecialEpisodes: false,
+    });
+    const ctx = createMockContext({ tenantId: 'test', errors: requestMediaTool.errors });
+    const input = requestMediaTool.input.parse({
+      mediaType: 'movie',
+      tmdbId: 1275779,
+      seasons: [0, 1],
+    });
+    const result = await requestMediaTool.handler(input, ctx);
+    expect(result.payload).not.toHaveProperty('seasons');
+  });
+
   it('allows seasons:"all" even when partial requests are disabled', async () => {
     service.getPublicSettings.mockResolvedValue({ ...settings, partialRequestsEnabled: false });
     const ctx = createMockContext({ tenantId: 'test', errors: requestMediaTool.errors });

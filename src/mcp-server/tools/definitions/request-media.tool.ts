@@ -63,13 +63,15 @@ export const requestMediaTool = tool('seerr_request_media', {
       .union([
         z.literal('all'),
         z
-          .array(z.number().int().min(1))
+          .array(z.number().int().min(0))
           .min(1)
-          .describe('Explicit list of season numbers to request, e.g. [1, 2].'),
+          .describe(
+            'Explicit list of season numbers to request, e.g. [1, 2]. Season 0 is Specials — accepted only when the instance enables special episodes.',
+          ),
       ])
       .optional()
       .describe(
-        'TV only. "all" requests every season, or an explicit list of season numbers (e.g. [1,2]). Season 0 (Specials) is excluded unless the instance enables special episodes. Required for TV requests; ignored for movies.',
+        'TV only. "all" hands the whole series to the instance, which decides whether that includes season 0 (Specials). An explicit list (e.g. [1,2]) requests exactly those seasons, and season 0 is rejected unless the instance enables special episodes. Required for TV requests; ignored for movies.',
       ),
     serverId: z
       .number()
@@ -191,6 +193,13 @@ export const requestMediaTool = tool('seerr_request_media', {
       recovery: 'Use seasons:"all" to request the full series instead of specific seasons.',
     },
     {
+      reason: 'special_episodes_not_enabled',
+      code: JsonRpcErrorCode.InvalidParams,
+      when: 'the season list includes 0 (Specials) but the instance has special episodes disabled.',
+      recovery:
+        'Drop season 0 from the list, or confirm specialEpisodesEnabled via seerr_service_options first.',
+    },
+    {
       reason: 'duplicate_request',
       code: JsonRpcErrorCode.InvalidParams,
       when: 'Seerr rejects the POST because an identical request already exists.',
@@ -246,10 +255,23 @@ export const requestMediaTool = tool('seerr_request_media', {
         },
       );
     }
-    if (Array.isArray(input.seasons) && !partialRequestsEnabled) {
+    /**
+     * Season constraints apply to the TV arm only — `buildPayload` drops `seasons`
+     * for a movie, so a movie request carrying one is a no-op, not a violation.
+     */
+    const seasonList =
+      input.mediaType === 'tv' && Array.isArray(input.seasons) ? input.seasons : undefined;
+    if (seasonList && !partialRequestsEnabled) {
       throw ctx.fail('partial_requests_disabled', undefined, {
         ...ctx.recoveryFor('partial_requests_disabled'),
       });
+    }
+    if (seasonList?.includes(0) && settings.enableSpecialEpisodes !== true) {
+      throw ctx.fail(
+        'special_episodes_not_enabled',
+        'Season 0 (Specials) cannot be requested — special episodes are disabled on this instance.',
+        { ...ctx.recoveryFor('special_episodes_not_enabled') },
+      );
     }
 
     const resolved = {

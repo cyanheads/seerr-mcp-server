@@ -291,7 +291,8 @@ z.object({
     title: z.string().optional().describe('Title — resolved via a follow-up media fetch; absent when not resolvable inline.'),
     tmdbId: z.number().optional().describe('TMDB ID of the requested media (from request.media.tmdbId).'),
     requestStatus: StatusRef.describe('Decoded request status {raw,label}.'),
-    mediaStatus: StatusRef.optional().describe('Decoded availability of the underlying media {raw,label} (from media.status).'),
+    mediaStatus: StatusRef.optional().describe('Decoded availability of the non-4K copy {raw,label} (from media.status).'),
+    mediaStatus4k: StatusRef.optional().describe('Decoded availability of the 4K copy {raw,label} (from media.status4k). The 4K copy downloads through a separate Radarr/Sonarr service, so this is the field that tracks an is4k request.'),
     is4k: z.boolean().describe('Whether this is a 4K request.'),
     seasons: z.array(z.number()).optional().describe('Requested season numbers (TV); empty array or omitted for movies or full-series requests.'),
     requestedBy: z.object({
@@ -332,9 +333,9 @@ z.object({
     .describe('Request the 4K version. Only valid when the instance has 4K enabled for this media type (preview reports capability); Seerr rejects 4K requests otherwise.'),
   seasons: z.union([
     z.literal('all'),
-    z.array(z.number().int().min(1)).min(1),
+    z.array(z.number().int().min(0)).min(1),
   ]).optional()
-    .describe('TV only. "all" requests every season, or an explicit list of season numbers (e.g. [1,2]). Season 0 (Specials) is excluded unless the instance enables special episodes. Required for TV requests; ignored for movies.'),
+    .describe('TV only. "all" hands the whole series to the instance, which decides whether that includes season 0 (Specials). An explicit list (e.g. [1,2]) requests exactly those seasons, and season 0 is rejected unless the instance enables special episodes. Required for TV requests; ignored for movies.'),
   serverId: z.number().int().min(0).optional()
     .describe('Override the Radarr/Sonarr server ID (from seerr_service_options). Omit to use the Seerr default — recommended.'),
   profileId: z.number().int().positive().optional()
@@ -429,6 +430,9 @@ errors: [
   { reason: 'partial_requests_disabled', code: JsonRpcErrorCode.InvalidParams,
     when: 'an explicit season list was given but the instance disallows partial requests',
     recovery: 'Use seasons:"all" to request the full series.' },
+  { reason: 'special_episodes_not_enabled', code: JsonRpcErrorCode.InvalidParams,
+    when: 'the season list includes 0 (Specials) but the instance has special episodes disabled',
+    recovery: 'Drop season 0 from the list, or confirm specialEpisodesEnabled via seerr_service_options first.' },
   { reason: 'duplicate_request', code: JsonRpcErrorCode.InvalidParams,
     when: 'Seerr rejects the POST because an identical request already exists',
     recovery: 'Check the existingRequest in this output; track it with seerr_request_status instead of re-requesting.' },
@@ -498,7 +502,7 @@ errors: [
 
 **Annotations:** `{ readOnlyHint: true, openWorldHint: true }`.
 
-**Field-shape notes (live):** `routing.profileName` should be declared **optional** — the field is `null` on the `GET /request/{id}` response in live probes (present at the list level but null here). Declare `routing.profileName` as `z.string().optional()`. `title` is not present on the request object — must be resolved from the media endpoint; declare `optional`. `request.type` (not `mediaType`) is the raw field name. `modifiedBy` is present and must also be projected through the redaction normalizer (same PII as `requestedBy`). `stateGuidance` is derived locally from the decoded status — it is *guidance*, not a fabricated fact; it never claims an ETA the API doesn't provide.
+**Field-shape notes (live):** `routing.profileName` should be declared **optional** — the field is `null` on the `GET /request/{id}` response in live probes (present at the list level but null here). Declare `routing.profileName` as `z.string().optional()`. `title` is not present on the request object — must be resolved from the media endpoint; declare `optional`. `request.type` (not `mediaType`) is the raw field name. `modifiedBy` is present and must also be projected through the redaction normalizer (same PII as `requestedBy`). `stateGuidance` is derived locally from the decoded request status plus the availability that tracks the request — `media.status4k` when `is4k` is true, `media.status` otherwise, since the two resolutions download through separate Radarr/Sonarr services. It is *guidance*, not a fabricated fact; it never claims an ETA the API doesn't provide.
 
 **Output fix — `routing.profileName` must be optional:**
 ```ts
