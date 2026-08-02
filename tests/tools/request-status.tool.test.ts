@@ -2,7 +2,8 @@
  * @fileoverview Tests for seerr_request_status. Headline: track one request — decoded
  * request + media status, redacted requester, routing (no paths), and a state-tuned
  * hint. Covers: full projection, profileName-null routing, stateGuidance derivation,
- * modifiedBy redaction, and the request_not_found contract bubbling.
+ * modifiedBy redaction, unflagged title hydration (and its degrade modes), and the
+ * request_not_found contract bubbling.
  * @module tests/tools/request-status.tool.test
  */
 
@@ -10,7 +11,7 @@ import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const service = { getRequest: vi.fn() };
+const service = { getRequest: vi.fn(), getMovie: vi.fn(), getTv: vi.fn() };
 
 vi.mock('@/services/seerr/seerr-service.js', () => ({ getSeerrService: () => service }));
 
@@ -121,6 +122,92 @@ describe('seerr_request_status', () => {
     expect(result.requestStatus).toEqual({ raw: 5, label: 'completed' });
     expect(result.mediaStatus).toEqual({ raw: 5, label: 'available' });
     expect(result.stateGuidance).toContain('available');
+  });
+
+  /* --- title hydration (no flag — a single request costs one extra read) --- */
+
+  it('joins the title from the media record without any opt-in flag', async () => {
+    service.getRequest.mockResolvedValue({
+      id: 47,
+      type: 'movie',
+      status: 2,
+      media: { tmdbId: 299534, status: 3 },
+    });
+    service.getMovie.mockResolvedValue({ id: 299534, title: 'Avengers: Endgame' });
+    const ctx = createMockContext({ tenantId: 'test', errors: requestStatusTool.errors });
+    const result = await requestStatusTool.handler(
+      requestStatusTool.input.parse({ requestId: 47 }),
+      ctx,
+    );
+
+    expect(service.getMovie).toHaveBeenCalledWith(299534, ctx, { maxRetries: 0 });
+    expect(result.title).toBe('Avengers: Endgame');
+    const text = (requestStatusTool.format!(result)[0] as { text: string }).text;
+    expect(text).toContain('Request #47 — Avengers: Endgame');
+  });
+
+  it('reads the TV title from `name` on a tv request', async () => {
+    service.getRequest.mockResolvedValue({
+      id: 49,
+      type: 'tv',
+      status: 2,
+      seasons: [{ seasonNumber: 1 }],
+      media: { tmdbId: 1399, status: 4 },
+    });
+    service.getTv.mockResolvedValue({ id: 1399, name: 'Game of Thrones' });
+    const ctx = createMockContext({ tenantId: 'test', errors: requestStatusTool.errors });
+    const result = await requestStatusTool.handler(
+      requestStatusTool.input.parse({ requestId: 49 }),
+      ctx,
+    );
+    expect(result.title).toBe('Game of Thrones');
+  });
+
+  it('degrades to no title when the media lookup fails, keeping every other field', async () => {
+    service.getRequest.mockResolvedValue({
+      id: 53,
+      type: 'movie',
+      status: 2,
+      media: { tmdbId: 404404, status: 3 },
+    });
+    service.getMovie.mockRejectedValue(new Error('Unable to retrieve movie.'));
+    const ctx = createMockContext({ tenantId: 'test', errors: requestStatusTool.errors });
+    const result = await requestStatusTool.handler(
+      requestStatusTool.input.parse({ requestId: 53 }),
+      ctx,
+    );
+
+    expect(result.title).toBeUndefined();
+    expect(result).toMatchObject({ requestId: 53, tmdbId: 404404, mediaStatus: { raw: 3 } });
+    const text = (requestStatusTool.format!(result)[0] as { text: string }).text;
+    expect(text).toContain('Request #53 — Untitled');
+  });
+
+  it('skips the lookup entirely when the request carries no tmdbId', async () => {
+    service.getRequest.mockResolvedValue({ id: 54, type: 'movie', status: 2, media: {} });
+    const ctx = createMockContext({ tenantId: 'test', errors: requestStatusTool.errors });
+    const result = await requestStatusTool.handler(
+      requestStatusTool.input.parse({ requestId: 54 }),
+      ctx,
+    );
+
+    expect(service.getMovie).not.toHaveBeenCalled();
+    expect(result.title).toBeUndefined();
+    expect(result.requestId).toBe(54);
+  });
+
+  /** The sparser arm of the same case: Seerr can omit `media` from the request entirely. */
+  it('skips the lookup when the request carries no media object at all', async () => {
+    service.getRequest.mockResolvedValue({ id: 55, type: 'movie', status: 2 });
+    const ctx = createMockContext({ tenantId: 'test', errors: requestStatusTool.errors });
+    const result = await requestStatusTool.handler(
+      requestStatusTool.input.parse({ requestId: 55 }),
+      ctx,
+    );
+
+    expect(service.getMovie).not.toHaveBeenCalled();
+    expect(result.title).toBeUndefined();
+    expect(result).toMatchObject({ requestId: 55, requestStatus: { label: 'approved' } });
   });
 
   it('bubbles request_not_found for a missing request id', async () => {

@@ -71,8 +71,19 @@ function buildQuery(params: Record<string, string | number | undefined>): string
     .join('&');
 }
 
+/**
+ * Per-call overrides for the media-detail reads (`getMovie` / `getTv`). Both are
+ * called on a required path (`seerr_get_media`, where the detail IS the answer)
+ * and on a best-effort path (the title join), whose failure is absorbed — so the
+ * retry budget has to be the caller's choice rather than one fixed policy.
+ */
+export interface DetailReadOptions {
+  /** Retry budget for this call. Omit for the framework default; `0` = single attempt. */
+  maxRetries?: number;
+}
+
 /** Options for a single Seerr request. */
-interface RequestOptions {
+interface RequestOptions extends DetailReadOptions {
   /** Retry backoff base (ms). LAN instance recovers fast; default 300. */
   baseDelayMs?: number;
   /** JSON body for POST. */
@@ -128,13 +139,16 @@ export class SeerrService {
   }
 
   /** `GET /movie/{id}` — movie detail. 500 "Unable to retrieve movie." → media_not_found. */
-  getMovie(tmdbId: number, ctx: Context): Promise<RawMovieDetail> {
-    return this.request<RawMovieDetail>(`/movie/${tmdbId}`, ctx, { notFoundKind: 'media' });
+  getMovie(tmdbId: number, ctx: Context, options: DetailReadOptions = {}): Promise<RawMovieDetail> {
+    return this.request<RawMovieDetail>(`/movie/${tmdbId}`, ctx, {
+      notFoundKind: 'media',
+      ...options,
+    });
   }
 
   /** `GET /tv/{id}` — TV detail. */
-  getTv(tmdbId: number, ctx: Context): Promise<RawTvDetail> {
-    return this.request<RawTvDetail>(`/tv/${tmdbId}`, ctx, { notFoundKind: 'media' });
+  getTv(tmdbId: number, ctx: Context, options: DetailReadOptions = {}): Promise<RawTvDetail> {
+    return this.request<RawTvDetail>(`/tv/${tmdbId}`, ctx, { notFoundKind: 'media', ...options });
   }
 
   /** `GET /tv/{id}/season/{n}` — episode list for one season. */
@@ -271,6 +285,7 @@ export class SeerrService {
         operation: `SeerrService.request ${method} ${path}`,
         context: { requestId: ctx.requestId, timestamp: ctx.timestamp },
         baseDelayMs: options.baseDelayMs ?? 300,
+        ...(options.maxRetries !== undefined ? { maxRetries: options.maxRetries } : {}),
         signal: ctx.signal,
       },
     );

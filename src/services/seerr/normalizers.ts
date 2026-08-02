@@ -171,6 +171,7 @@ export interface DomainRequestDetail {
   routing: { serverId?: number; profileName?: string; is4k: boolean };
   seasons?: number[];
   stateGuidance?: string;
+  title?: string;
   tmdbId?: number;
   updatedAt: string;
 }
@@ -180,7 +181,9 @@ export interface DomainRequestDetail {
  * `DomainRequestDetail`. The media-type discriminator is `type` (not `mediaType`);
  * `requestedBy` is projected to `{ id, displayName }`; `modifiedBy`, `serviceUrl`,
  * tokens, and paths are dropped by omission. `routing` carries names/IDs only.
- * `title` is intentionally absent — request objects have no title field.
+ * `title` is never set here — request objects have no title field, so it is
+ * joined from the media detail endpoint by `hydrateRequestTitle` (`titles.ts`),
+ * keeping this projection sync and I/O-free.
  * `stateGuidance` reads `status4k` for a 4K request and `status` otherwise.
  */
 export function projectRequestDetail(raw: RawMediaRequest): DomainRequestDetail {

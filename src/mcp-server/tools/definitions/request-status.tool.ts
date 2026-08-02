@@ -4,8 +4,10 @@
  * (PII-redacted), a routing summary (names/IDs only — no filesystem paths), and a
  * status-tuned recovery hint. A missing request id surfaces as request_not_found
  * (Seerr's raw HTTP 404 is classified in the service layer). `profileName` is null
- * at this endpoint, so routing.profileName is optional; `title` is not on the
- * request object, so it is left unpopulated.
+ * at this endpoint, so routing.profileName is optional. `title` is not on the
+ * request object; it is joined from the media detail endpoint on every call — one
+ * request, one extra read, so it needs no opt-in flag. A request with no tmdbId,
+ * or a detail lookup that fails, degrades to no title rather than failing.
  * @module mcp-server/tools/definitions/request-status.tool
  */
 
@@ -14,6 +16,7 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { projectRequestDetail } from '@/services/seerr/normalizers.js';
 import { getSeerrService } from '@/services/seerr/seerr-service.js';
 import { StatusRef, statusText } from '@/services/seerr/status.js';
+import { hydrateRequestTitle } from '@/services/seerr/titles.js';
 
 export const requestStatusTool = tool('seerr_request_status', {
   title: 'seerr-mcp-server: request status',
@@ -32,7 +35,12 @@ export const requestStatusTool = tool('seerr_request_status', {
   output: z.object({
     requestId: z.number().describe('The request ID.'),
     mediaType: z.enum(['movie', 'tv']).describe('Movie or TV.'),
-    title: z.string().optional().describe('Title of the requested media when joinable.'),
+    title: z
+      .string()
+      .optional()
+      .describe(
+        'Title of the requested media, joined from the media record; absent when the request carries no tmdbId or the lookup failed.',
+      ),
     tmdbId: z.number().optional().describe('TMDB ID of the media.'),
     requestStatus: StatusRef.describe('Decoded request status {raw,label}.'),
     mediaStatus: StatusRef.optional().describe('Decoded media availability {raw,label}.'),
@@ -78,10 +86,11 @@ export const requestStatusTool = tool('seerr_request_status', {
   async handler(input, ctx) {
     const seerr = getSeerrService();
     const raw = await seerr.getRequest(input.requestId, ctx);
-    const detail = projectRequestDetail(raw);
+    const detail = await hydrateRequestTitle(projectRequestDetail(raw), seerr, ctx);
     ctx.log.info('Seerr request status fetched', {
       requestId: input.requestId,
       status: detail.requestStatus.label,
+      titleResolved: detail.title !== undefined,
     });
     return detail;
   },

@@ -2,9 +2,11 @@
  * @fileoverview seerr_list_requests — review recent requests and their lifecycle.
  * Wraps `GET /request`. Echoes the applied filters and decodes every numeric
  * status. The media-type discriminator is the raw `type` field (not `mediaType`);
- * `requestedBy` is PII-redacted; `title` is left unpopulated by default (the
- * request object has no title field — resolving it would cost one media fetch per
- * row). The total count comes from `pageInfo.results`.
+ * `requestedBy` is PII-redacted. The request object has no title field, so
+ * `title` is unpopulated unless `includeTitles` is set — that opt-in costs one
+ * media fetch per DISTINCT `(mediaType, tmdbId)` on the page, and rows that
+ * cannot be hydrated degrade to no title plus an enrichment notice. The total
+ * count comes from `pageInfo.results`.
  * @module mcp-server/tools/definitions/list-requests.tool
  */
 
@@ -17,11 +19,17 @@ import {
   StatusRef,
   statusText,
 } from '@/services/seerr/status.js';
+import { resolveTitles, type TitleKey, titleKeyOf } from '@/services/seerr/titles.js';
+
+/** Pluralize "request" for a notice count. */
+function requestCount(n: number): string {
+  return `${n} request${n === 1 ? '' : 's'}`;
+}
 
 export const listRequestsTool = tool('seerr_list_requests', {
   title: 'seerr-mcp-server: list requests',
   description:
-    'List recent media requests with their lifecycle status. Filter by status, media type, and requester; echoes the applied filters and decodes every numeric status. Pass a requestId from the results to seerr_request_status for full detail. Titles are not on request objects, so they are omitted here — fetch a title with seerr_get_media when needed.',
+    'List recent media requests with their lifecycle status. Filter by status, media type, and requester; echoes the applied filters and decodes every numeric status. Pass a requestId from the results to seerr_request_status for full detail. Titles are not on request objects — set includeTitles to resolve them, or fetch one with seerr_get_media.',
   annotations: { readOnlyHint: true, openWorldHint: true },
   input: z.object({
     filter: z
@@ -73,6 +81,12 @@ export const listRequestsTool = tool('seerr_list_requests', {
       .min(0)
       .default(0)
       .describe('Number of requests to skip for pagination (offset). Use take+skip to page.'),
+    includeTitles: z
+      .boolean()
+      .default(false)
+      .describe(
+        'Resolve each row\'s title. Default false keeps the call to a single upstream read; true adds one media lookup per distinct title on the page (rows sharing a title, such as a 4K and a non-4K request, resolve once). Rows that cannot be resolved keep every other field and stay "Untitled".',
+      ),
   }),
   output: z.object({
     requests: z
@@ -85,7 +99,7 @@ export const listRequestsTool = tool('seerr_list_requests', {
               .string()
               .optional()
               .describe(
-                'Title of the requested media; absent because request objects carry no title field.',
+                'Title of the requested media. Present only when includeTitles was set and the lookup succeeded — request objects carry no title field.',
               ),
             tmdbId: z.number().optional().describe('TMDB ID of the requested media.'),
             requestStatus: StatusRef.describe('Decoded request status {raw,label}.'),
@@ -129,7 +143,12 @@ export const listRequestsTool = tool('seerr_list_requests', {
       .describe('True when the page filled to the take limit (more may exist).'),
     shown: z.number().optional().describe('Number of requests returned.'),
     cap: z.number().optional().describe('The take limit that was applied.'),
-    notice: z.string().optional().describe('Guidance when no requests matched.'),
+    notice: z
+      .string()
+      .optional()
+      .describe(
+        'Combined guidance for this page: the paging hint when the result was capped, a broaden-the-filter hint when nothing matched, and disclosure when includeTitles left some rows without a title. All applicable parts are joined into this one field.',
+      ),
   },
   enrichmentTrailer: {
     appliedFilters: {
@@ -154,10 +173,33 @@ export const listRequestsTool = tool('seerr_list_requests', {
     );
 
     const rows = response.results ?? [];
+    const typeOf = (r: (typeof rows)[number]) =>
+      r.type === 'tv' ? ('tv' as const) : ('movie' as const);
+
+    /**
+     * Hydration is opt-in because its cost scales with the page: with
+     * includeTitles unset this stays a single upstream read, exactly as before.
+     */
+    const lookup = input.includeTitles
+      ? await resolveTitles(
+          rows.flatMap<TitleKey>((r) =>
+            typeof r.media?.tmdbId === 'number'
+              ? [{ mediaType: typeOf(r), tmdbId: r.media.tmdbId }]
+              : [],
+          ),
+          seerr,
+          ctx,
+        )
+      : undefined;
+
     const requests = rows.map((r) => {
-      const mediaType = r.type === 'tv' ? ('tv' as const) : ('movie' as const);
+      const mediaType = typeOf(r);
       const seasons = normalizeSeasons(r);
       const tmdbId = r.media?.tmdbId;
+      const title =
+        lookup && typeof tmdbId === 'number'
+          ? lookup.titles.get(titleKeyOf(mediaType, tmdbId))
+          : undefined;
       const mediaStatus =
         typeof r.media?.status === 'number' ? decodeMediaStatus(r.media.status) : undefined;
       const mediaStatus4k =
@@ -165,6 +207,7 @@ export const listRequestsTool = tool('seerr_list_requests', {
       return {
         requestId: r.id,
         mediaType,
+        ...(title ? { title } : {}),
         ...(typeof tmdbId === 'number' ? { tmdbId } : {}),
         requestStatus: decodeRequestStatus(r.status ?? 1),
         ...(mediaStatus ? { mediaStatus } : {}),
@@ -181,19 +224,52 @@ export const listRequestsTool = tool('seerr_list_requests', {
     ctx.enrich({
       appliedFilters: { filter: input.filter, mediaType: input.mediaType, sort: input.sort },
     });
-    if (requests.length >= input.take && requests.length < total) {
-      ctx.enrich.truncated({ shown: requests.length, cap: input.take });
-    }
+    const notices: string[] = [];
     if (requests.length === 0) {
-      ctx.enrich.notice(
+      notices.push(
         `No requests matched filter="${input.filter}", mediaType="${input.mediaType}". Try filter="all" or a different mediaType.`,
       );
+    }
+    if (lookup) {
+      /**
+       * Two distinct outcomes, kept apart on purpose: a row with no tmdbId was
+       * never hydratable (normal), while a row that had one and still has no
+       * title had its lookup attempted and fail.
+       */
+      const noTmdbId = requests.filter((r) => r.tmdbId === undefined).length;
+      const unresolved = requests.filter(
+        (r) => r.tmdbId !== undefined && r.title === undefined,
+      ).length;
+      if (unresolved > 0) {
+        notices.push(
+          `Title lookup failed for ${requestCount(unresolved)}; those rows keep every other field.`,
+        );
+      }
+      if (noTmdbId > 0) {
+        notices.push(`Titles unavailable for ${requestCount(noTmdbId)} with no tmdbId.`);
+      }
+    }
+    /**
+     * `enrich.truncated` writes the shared `notice` field, so a hydration
+     * disclosure and the pagination hint would silently overwrite each other.
+     * Compose them into one string when both apply.
+     */
+    if (requests.length >= input.take && requests.length < total) {
+      const pagination = `Results capped at ${input.take}; showing ${requests.length} of ${total}. Raise take or page with skip.`;
+      ctx.enrich.truncated({
+        shown: requests.length,
+        cap: input.take,
+        guidance: [pagination, ...notices].join(' '),
+      });
+    } else if (notices.length > 0) {
+      ctx.enrich.notice(notices.join(' '));
     }
 
     ctx.log.info('Seerr request list fetched', {
       filter: input.filter,
       returned: requests.length,
       total,
+      titleLookups: lookup?.uniqueKeys ?? 0,
     });
     return { requests };
   },

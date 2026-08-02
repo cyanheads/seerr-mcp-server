@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.1.1-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/seerr-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/seerr-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.2-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.1.2-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/seerr-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/seerr-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.2-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -36,9 +36,9 @@ Six tools covering the request workflow — discover (`search`) → confirm (`ge
 |:---|:---|
 | `seerr_search_media` | Search movies and TV by title; returns ranked matches with TMDB ID, year, overview, and decoded availability when Jellyseerr already tracks the title. The required first step before requesting. |
 | `seerr_get_media` | Fetch exact movie/show details by TMDB ID + media type to confirm the title before a write; for TV, a per-season summary or one season's episode list. |
-| `seerr_list_requests` | List recent requests with status/type/requester filters; echoes the applied filters and decodes every numeric status. |
+| `seerr_list_requests` | List recent requests with status/type/requester filters; echoes the applied filters and decodes every numeric status. Titles are opt-in via `includeTitles`. |
 | `seerr_request_media` | **Guarded write.** Previews the request payload by default (`mode: preview`); creates the request only on `mode: request` with an elicited confirmation. |
-| `seerr_request_status` | Fetch one request by ID — decoded request + media availability (incl. 4K), requester, routing summary, and a state-tuned next-step hint. |
+| `seerr_request_status` | Fetch one request by ID — title, decoded request + media availability (incl. 4K), requester, routing summary, and a state-tuned next-step hint. |
 | `seerr_service_options` | Summarize configured Radarr/Sonarr services, default quality profiles, and instance capability flags (4K, partial requests, specials, media server). Filesystem paths redacted unless `includePaths`. |
 
 Every status field is decoded to `{ raw, label }` — both the numeric code Jellyseerr returns and a human label — so an agent never has to hardcode the enum mapping.
@@ -72,7 +72,8 @@ Review recent requests and their lifecycle. Wraps `GET /request`.
 - Lifecycle `filter` (pending, processing, available, failed, …), `mediaType`, and `requestedById` filters
 - Sort by created (`added`) or last-changed (`modified`), ascending or descending
 - `take` / `skip` pagination; the enrichment trailer echoes the filter set the server applied
-- Requester is PII-redacted to `{ id, displayName }`; titles aren't on request objects, so they're omitted here — fetch one with `seerr_get_media` when needed
+- Requester is PII-redacted to `{ id, displayName }`
+- Titles aren't on request objects. `includeTitles: true` joins them from the media records — one lookup per _distinct_ title on the page, so a 4K and a non-4K request for one film cost one call. Default is off, keeping the call to a single upstream read. Rows that can't be resolved keep every other field and are disclosed in the notice
 
 ---
 
@@ -103,7 +104,7 @@ Lets an agent reason about request capability and routing without a separate sta
 
 | Type | Name | Description |
 |:---|:---|:---|
-| Resource | `seerr://request/{requestId}` | Read-once summary of one request — decoded status + media availability + routing. Mirrors `seerr_request_status`. |
+| Resource | `seerr://request/{requestId}` | Read-once summary of one request — title, decoded status + media availability + routing. Mirrors `seerr_request_status`. |
 
 All request data is also reachable via tools — request _enumeration_ is the job of `seerr_list_requests` (filterable, the tool-only access path), so the collection is intentionally not exposed as a resource. There are no prompts; the guarded-write workflow lives in the tool, not a prompt template.
 

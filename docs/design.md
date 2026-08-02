@@ -14,9 +14,9 @@ Local-only (`hostable: false`), stdio default. Auth to Seerr is a single `X-Api-
 |:-----|:------------|:-----------|:------------|
 | `seerr_search_media` | Search movies and TV shows by title; returns ranked matches with TMDB ID, year, overview, and decoded availability/request status when Seerr already tracks the title. Required first step before requesting. | `query` (req), `mediaType` (movie\|tv\|all), `page`, `language`, `limit` | `readOnlyHint`, `openWorldHint` |
 | `seerr_get_media` | Fetch exact movie or show details by TMDB ID + media type to confirm the right title before any write. For TV, optionally include season summaries or one season's episode list. | `mediaType` (movie\|tv, req), `tmdbId` (req), `seasonNumber?` | `readOnlyHint`, `openWorldHint` |
-| `seerr_list_requests` | List recent media requests with status/type/requester filters; echoes filters and decodes numeric statuses. | `filter?`, `mediaType?`, `requestedById?`, `sort?`, `sortDirection?`, `take`, `skip` | `readOnlyHint`, `openWorldHint` |
+| `seerr_list_requests` | List recent media requests with status/type/requester filters; echoes filters and decodes numeric statuses. Titles are opt-in (`includeTitles`) because their cost scales with the page. | `filter?`, `mediaType?`, `requestedById?`, `sort?`, `sortDirection?`, `take`, `skip`, `includeTitles` (default false) | `readOnlyHint`, `openWorldHint` |
 | `seerr_request_media` | **Guarded write.** Resolves the exact title, previews the request payload (default `mode: preview`, no write), and creates the Seerr request only on `mode: request`. Treats "download X" as "create a Seerr request." | `mediaType` (req), `tmdbId` (req), `mode` (preview\|request, default preview), `is4k?`, `seasons?`, route overrides (`serverId?`, `profileId?`, `rootFolder?`, `languageProfileId?`) | `destructiveHint`, `openWorldHint`, `idempotentHint:false` |
-| `seerr_request_status` | Fetch one request by ID; returns decoded request status, decoded media availability (incl. 4K), requester, routing summary, and a recovery hint for pending/failed/processing states. | `requestId` (req) | `readOnlyHint`, `openWorldHint` |
+| `seerr_request_status` | Fetch one request by ID; returns the joined title, decoded request status, decoded media availability (incl. 4K), requester, routing summary, and a recovery hint for pending/failed/processing states. | `requestId` (req) | `readOnlyHint`, `openWorldHint` |
 | `seerr_service_options` | Summarize configured Radarr/Sonarr services + default quality profiles, plus compact Seerr version and public feature flags (4K, partial requests, specials) so an agent can reason about request capability. Redacts filesystem paths unless `includePaths: true`. | `service?` (radarr\|sonarr\|all), `includePaths` (default false) | `readOnlyHint`, `openWorldHint` |
 
 Six tools. The surface is self-sufficient for a tool-only client: discover (`search`) → confirm (`get`) → understand routing (`service_options`) → request (`request_media`) → track (`request_status` / `list_requests`).
@@ -25,7 +25,7 @@ Six tools. The surface is self-sufficient for a tool-only client: discover (`sea
 
 | URI Template | Description | Pagination |
 |:-------------|:------------|:-----------|
-| `seerr://request/{requestId}` | Read-once request summary — decoded status + media availability + routing. Mirrors `seerr_request_status` for clients that support injectable context. | None (single record) |
+| `seerr://request/{requestId}` | Read-once request summary — joined title, decoded status + media availability + routing. Mirrors `seerr_request_status` for clients that support injectable context. | None (single record) |
 
 One resource, fully covered by the tool surface. No `list()` — request enumeration is the job of `seerr_list_requests` (filterable, the tool-only access path).
 
@@ -279,6 +279,8 @@ z.object({
     .describe('Page size — max requests to return in one call.'),
   skip: z.number().int().min(0).default(0)
     .describe('Number of requests to skip for pagination (offset). Use take+skip to page.'),
+  includeTitles: z.boolean().default(false)
+    .describe('Resolve each row\'s title. Default false keeps the call to a single upstream read; true adds one media lookup per distinct title on the page (rows sharing a title, such as a 4K and a non-4K request, resolve once). Rows that cannot be resolved keep every other field and stay "Untitled".'),
 })
 ```
 
@@ -288,7 +290,7 @@ z.object({
   requests: z.array(z.object({
     requestId: z.number().describe('Request ID — pass to seerr_request_status.'),
     mediaType: z.enum(['movie','tv']).describe('Movie or TV (derived from request.type field on the raw object).'),
-    title: z.string().optional().describe('Title — resolved via a follow-up media fetch; absent when not resolvable inline.'),
+    title: z.string().optional().describe('Title of the requested media. Present only when includeTitles was set and the lookup succeeded — request objects carry no title field.'),
     tmdbId: z.number().optional().describe('TMDB ID of the requested media (from request.media.tmdbId).'),
     requestStatus: StatusRef.describe('Decoded request status {raw,label}.'),
     mediaStatus: StatusRef.optional().describe('Decoded availability of the non-4K copy {raw,label} (from media.status).'),
@@ -304,13 +306,13 @@ z.object({
 })
 ```
 
-**Enrichment:** `totalCount` (from `pageInfo.results` via `ctx.enrich.total` — live confirmed: `{ page, pages, pageSize, results }` where `results` is the total count), `truncated`/`shown`/`cap` (optional — fired when `results.length >= take`), `echo` of the applied filter set (`filter=…, mediaType=…, sort=…`), `notice` on empty.
+**Enrichment:** `totalCount` (from `pageInfo.results` via `ctx.enrich.total` — live confirmed: `{ page, pages, pageSize, results }` where `results` is the total count), `truncated`/`shown`/`cap` (optional — fired when `results.length >= take` and the total exceeds what was returned), `echo` of the applied filter set (`filter=…, mediaType=…, sort=…`), `notice` on empty and on partial title hydration. `ctx.enrich.truncated` writes the same `notice` field (last-wins), so the handler composes the pagination hint and any hydration disclosure into one string rather than issuing two calls.
 
 **Errors:** None declared — empty is normal; upstream 5xx bubbles.
 
 **Annotations:** `{ readOnlyHint: true, openWorldHint: true }`.
 
-**Field-shape note (live):** real `MediaRequest` carries `type`, `seasonCount`, `profileName`, `isAutoRequest`, `canRemove` (absent in some calls), `tags`, `serverId`, `profileId`, `rootFolder`, `languageProfileId`, and a nested `media` with `status`/`status4k`. The output projects the agent-relevant subset. **`title` is NOT a field on the request object** — neither at list nor single-request endpoints. `title` must be resolved by calling `GET /movie/{tmdbId}` or `GET /tv/{tmdbId}` using `media.tmdbId`; the `title` output field is therefore declared `optional`. `mediaType` in the response comes from `request.type` (the field on the request is `type`, not `mediaType`). `requestedBy` and `modifiedBy` are full `User` objects — both must be projected to `{ id, displayName }` via normalizers. `pageInfo` is `{ page, pages, pageSize, results }`. Note that `serviceErrors` is also present at the list level (`{ radarr: [], sonarr: [] }`) — ignore/drop it from output.
+**Field-shape note (live):** real `MediaRequest` carries `type`, `seasonCount`, `profileName`, `isAutoRequest`, `canRemove` (absent in some calls), `tags`, `serverId`, `profileId`, `rootFolder`, `languageProfileId`, and a nested `media` with `status`/`status4k`. The output projects the agent-relevant subset. **`title` is NOT a field on the request object** — neither at list nor single-request endpoints. It is resolved by calling `GET /movie/{tmdbId}` or `GET /tv/{tmdbId}` using `media.tmdbId`, which this tool does inline when `includeTitles` is set (`src/services/seerr/titles.ts`); the `title` output field stays `optional` because `media.tmdbId` is not guaranteed — `media` can be absent entirely, and present-but-without-`tmdbId` also occurs — and because a lookup can fail. Neither case is an error: the row keeps every other field, and the two outcomes are disclosed separately (attempted-and-failed vs. never-hydratable) so a normal missing ID never reads as a failure. `mediaType` in the response comes from `request.type` (the field on the request is `type`, not `mediaType`). `requestedBy` and `modifiedBy` are full `User` objects — both must be projected to `{ id, displayName }` via normalizers. `pageInfo` is `{ page, pages, pageSize, results }`. Note that `serviceErrors` is also present at the list level (`{ radarr: [], sonarr: [] }`) — ignore/drop it from output.
 
 ---
 
@@ -468,7 +470,7 @@ z.object({
 z.object({
   requestId: z.number().describe('The request ID.'),
   mediaType: z.enum(['movie','tv']).describe('Movie or TV.'),
-  title: z.string().optional().describe('Title of the requested media when joinable.'),
+  title: z.string().optional().describe('Title of the requested media, joined from the media record; absent when the request carries no tmdbId or the lookup failed.'),
   tmdbId: z.number().optional().describe('TMDB ID of the media.'),
   requestStatus: StatusRef.describe('Decoded request status {raw,label}.'),
   mediaStatus: StatusRef.optional().describe('Decoded media availability {raw,label}.'),
@@ -502,7 +504,7 @@ errors: [
 
 **Annotations:** `{ readOnlyHint: true, openWorldHint: true }`.
 
-**Field-shape notes (live):** `routing.profileName` should be declared **optional** — the field is `null` on the `GET /request/{id}` response in live probes (present at the list level but null here). Declare `routing.profileName` as `z.string().optional()`. `title` is not present on the request object — must be resolved from the media endpoint; declare `optional`. `request.type` (not `mediaType`) is the raw field name. `modifiedBy` is present and must also be projected through the redaction normalizer (same PII as `requestedBy`). `stateGuidance` is derived locally from the decoded request status plus the availability that tracks the request — `media.status4k` when `is4k` is true, `media.status` otherwise, since the two resolutions download through separate Radarr/Sonarr services. It is *guidance*, not a fabricated fact; it never claims an ETA the API doesn't provide.
+**Field-shape notes (live):** `routing.profileName` should be declared **optional** — the field is `null` on the `GET /request/{id}` response in live probes (present at the list level but null here). Declare `routing.profileName` as `z.string().optional()`. `title` is not present on the request object — it is joined from the media endpoint on every call here (one request, one extra read, so no opt-in flag), and stays `optional` because a request with no `media.tmdbId`, or a failed lookup, degrades to no title rather than an error. `request.type` (not `mediaType`) is the raw field name. `modifiedBy` is present and must also be projected through the redaction normalizer (same PII as `requestedBy`). `stateGuidance` is derived locally from the decoded request status plus the availability that tracks the request — `media.status4k` when `is4k` is true, `media.status` otherwise, since the two resolutions download through separate Radarr/Sonarr services. It is *guidance*, not a fabricated fact; it never claims an ETA the API doesn't provide.
 
 **Output fix — `routing.profileName` must be optional:**
 ```ts
@@ -579,9 +581,10 @@ z.object({
 
 Single service, init/accessor pattern (`getSeerrService()`), initialized in `setup()`. One upstream API → one service. Internal structure:
 
-- `seerr-service.ts` — the client: typed methods (`search`, `getMovie`, `getTv`, `getSeason`, `listRequests`, `getRequest`, `createRequest`, `getRadarrServices`, `getRadarrDetail`, `getSonarrServices`, `getSonarrDetail`, `getPublicSettings`, `getStatus`). Each wraps `fetchWithTimeout` + `withRetry` (`@cyanheads/mcp-ts-core/utils`).
+- `seerr-service.ts` — the client: typed methods (`search`, `getMovie`, `getTv`, `getSeason`, `listRequests`, `getRequest`, `createRequest`, `getRadarrServices`, `getRadarrDetail`, `getSonarrServices`, `getSonarrDetail`, `getPublicSettings`, `getStatus`). Each wraps plain `fetch` + `withRetry` (`@cyanheads/mcp-ts-core/utils`) — **not** `fetchWithTimeout`, whose SSRF guard would block the private LAN/Tailscale address and whose thrown error hides the response body the not-found classifier reads. The timeout comes from `AbortSignal.timeout` instead.
 - `status.ts` — pure status decoders (`decodeRequestStatus`, `decodeMediaStatus`, `decodeMediaServer`) returning `{ raw, label }`.
 - `normalizers.ts` — raw→domain projection, including the `User`→`{id,displayName}` and path/URL redaction. The single choke point for PII/infra stripping.
+- `titles.ts` — the request→title join (`resolveTitles` for a page, `hydrateRequestTitle` for one record). Request objects carry no title, so this reads `getMovie`/`getTv` and keeps only the title string. De-duplicates by `(mediaType, tmdbId)`, caps concurrency, and makes every leg single-attempt; a failed or impossible lookup yields no title rather than an error.
 - `types.ts` — raw upstream types (hand-written from spec + live probes) and domain types.
 - `errors.ts` — the upstream-error classifier: detects HTTP 500 + body `Unable to retrieve movie.` → `media_not_found`; maps other non-OK to `ServiceUnavailable`.
 
@@ -591,7 +594,7 @@ Single service, init/accessor pattern (`getSeerrService()`), initialized in `set
 |:--|:--|
 | Retry boundary | Service method wraps fetch + parse via `withRetry`. |
 | Backoff | ~300ms base (local/LAN instance recovers fast; not rate-limited). |
-| HTTP status check | `fetchWithTimeout` → non-OK throws; the error classifier inspects status+body to distinguish `media_not_found` from generic `ServiceUnavailable` **before** the generic mapping. |
+| HTTP status check | The service checks `response.ok` itself and hands the non-OK response to the error classifier, which inspects status+body to distinguish `media_not_found` from generic `ServiceUnavailable` **before** the generic mapping. |
 | Parse classification | Seerr returns JSON error envelopes (`{message}`); the classifier reads them rather than treating a 500 body as a serialization failure. |
 | Settings cache | `getPublicSettings()`/`getStatus()` cached in `ctx.state` with a short TTL — read on most calls (capability checks), changes rarely. |
 
@@ -676,7 +679,9 @@ Each step is independently testable; read-only steps (2–3, 5) verify against t
 
 7. **Capped-list disclosure uses optional enrichment fields.** `truncated`/`shown`/`cap` are declared **optional** in the `enrichment` block (the framework only populates them when the cap is actually hit — declaring them required throws -32007 on every non-truncated result). `totalCount` is the required field, populated via `ctx.enrich.total(n)` on every call. Applies to `seerr_search_media` and `seerr_list_requests`.
 
-8. **No DataCanvas, no resource list().** The surface is categorical/operational metadata + lifecycle state (titles, IDs, statuses, routing) — a find-then-act discovery shape, not analytical rows an agent runs SQL over. DataCanvas would be dead weight. The one resource (`seerr://request/{id}`) is single-record; request *enumeration* is the filterable `seerr_list_requests` tool, which is the tool-only access path.
+8. **Title hydration is opt-in exactly where its cost scales with the input.** Request objects carry no title, so a readable row costs one media detail call. `seerr_list_requests` gates that behind `includeTitles` (default false) because a page can hold up to 100 rows — with the flag unset the tool makes the same single upstream call it always did. `seerr_request_status` and the `seerr://request/{id}` resource hydrate unconditionally: one request means one extra read, so a flag there would be schema noise, and a resource has no per-read input to gate on anyway. Within a hydrating call, lookups de-duplicate by `(mediaType, tmdbId)` — a 4K and a non-4K request for one film, or several seasons of one show, resolve once — and run through a fixed 6-wide worker pool so a full page never fans out unbounded against a self-hosted single-node instance. No cross-call title cache: intra-call de-duplication covers the case whose cost scales with `take`, while a keyed `ctx.state` cache would add an unbounded key space, a TTL, and N state round-trips to save only on repeated identical list calls. Rows that cannot be hydrated degrade rather than fail, and the disclosure keeps "lookup attempted and failed" separate from "no `tmdbId` to look up" so the normal case never reads as an error.
+
+9. **No DataCanvas, no resource list().** The surface is categorical/operational metadata + lifecycle state (titles, IDs, statuses, routing) — a find-then-act discovery shape, not analytical rows an agent runs SQL over. DataCanvas would be dead weight. The one resource (`seerr://request/{id}`) is single-record; request *enumeration* is the filterable `seerr_list_requests` tool, which is the tool-only access path.
 
 ---
 
@@ -687,7 +692,7 @@ The OpenAPI spec lags the running API in several places — the design follows t
 | Area | Spec says | Live reality | Design follows |
 |:--|:--|:--|:--|
 | `MediaInfo.status` | single `status` | `status` **and** `status4k` (separate 4K availability) | both decoded |
-| `MediaRequest` | minimal (`id`, `status`, `media`, …) | rich: `type`, `seasonCount`, `profileName` (null at single-request endpoint), `isAutoRequest`, nested `media.status/status4k/serviceUrl`; **no `title` field** | project agent-relevant subset; `title` optional (requires media fetch to populate) |
+| `MediaRequest` | minimal (`id`, `status`, `media`, …) | rich: `type`, `seasonCount`, `profileName` (null at single-request endpoint), `isAutoRequest`, nested `media.status/status4k/serviceUrl`; **no `title` field** | project agent-relevant subset; `title` optional, joined from the media endpoint (`titles.ts`) |
 | `MediaRequest.profileName` | present | **null at `GET /request/{id}`** — zero on live probe | declare `routing.profileName` as optional |
 | `MediaRequest.type` | (not well documented) | `"movie"` or `"tv"` — field is `type`, NOT `mediaType` | normalizer maps `request.type → mediaType` in output |
 | `/request` (list) | `pageInfo` + `results` | `{ pageInfo: { page, pages, pageSize, results }, results[], serviceErrors }` | use `pageInfo.results` for `totalCount` |
@@ -715,7 +720,7 @@ The OpenAPI spec lags the running API in several places — the design follows t
 - **No native batch.** Seerr's GETs are single-ID; N titles = N calls. The surface mitigates by enriching search/get with availability inline (no follow-up needed to see status).
 - **Request ETA is not available.** `stateGuidance` offers next-step advice (pending/processing/failed) but never fabricates a completion time the API doesn't provide.
 - **Hostability blocked by design.** Per-user base URLs + keys + a stronger human-approval model would be required to host publicly; local stdio is the right shape.
-- **`title` not on request objects.** Neither `GET /request` (list) nor `GET /request/{id}` returns a `title` field — the media nested object only carries `tmdbId`, `mediaType`, and status fields. `title` in list/status tool output requires a secondary `GET /movie/{tmdbId}` or `GET /tv/{tmdbId}` call. Given the cost (one extra fetch per request in the list), the design opts to leave `title` optional and populated only when already known from context (e.g., after a `seerr_get_media` call).
+- **`title` not on request objects.** Neither `GET /request` (list) nor `GET /request/{id}` returns a `title` field — the media nested object only carries `tmdbId`, `mediaType`, and status fields, so a title costs a secondary `GET /movie/{tmdbId}` or `GET /tv/{tmdbId}`. The single-request surfaces pay it on every read; the list gates it behind `includeTitles` and de-duplicates, so the flag's real cost is one call per *distinct* title on the page, not per row. `title` stays optional everywhere — `media.tmdbId` is not guaranteed, and a failed lookup degrades rather than erroring.
 - **`languageProfileId` is a no-op on Sonarr v4.** The field is accepted by the POST but has no effect. The design exposes it as an override for completeness (useful for Sonarr v3 instances), but `seerr_service_options` correctly reports `languageProfiles: null` for v4.
 
 ---

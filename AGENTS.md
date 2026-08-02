@@ -1,7 +1,7 @@
 # Developer Protocol
 
 **Server:** seerr-mcp-server
-**Version:** 0.1.1
+**Version:** 0.1.2
 **Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.11.0`
 **Engines:** Bun ≥1.3.0, Node ≥24.0.0
 **MCP SDK:** `@modelcontextprotocol/sdk` ^1.29.0
@@ -245,6 +245,7 @@ src/
       seerr-service.ts                  # Jellyseerr REST client (init/accessor pattern)
       status.ts                         # Pure status decoders → { raw, label }
       normalizers.ts                    # PII/infra redaction choke point (the security boundary)
+      titles.ts                         # Request → title join (deduped, capped, best-effort)
       errors.ts                         # Upstream-error classifier (500 → media_not_found, 404 → request_not_found)
       types.ts                          # Raw upstream + domain types
   mcp-server/

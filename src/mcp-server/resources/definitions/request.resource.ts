@@ -2,9 +2,12 @@
  * @fileoverview seerr://request/{requestId} — read-once request summary. Mirrors
  * seerr_request_status for clients that support injectable resource context:
  * decoded request + media status, requester (PII-redacted), routing summary, and a
- * state-tuned hint. Reuses the same `projectRequestDetail` choke point as the tool,
- * so the redaction is identical. No `list()` — request enumeration is the job of
- * the filterable seerr_list_requests tool (the tool-only access path).
+ * state-tuned hint. Reuses the same `projectRequestDetail` choke point and title
+ * join as the tool, so the output is identical and equally redacted. A resource
+ * takes no per-read options, so the title is always joined — one request, one
+ * extra read — and degrades to absent when the request has no tmdbId or the
+ * lookup fails. No `list()` — request enumeration is the job of the filterable
+ * seerr_list_requests tool (the tool-only access path).
  * @module mcp-server/resources/definitions/request.resource
  */
 
@@ -13,6 +16,7 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { projectRequestDetail } from '@/services/seerr/normalizers.js';
 import { getSeerrService } from '@/services/seerr/seerr-service.js';
 import { StatusRef } from '@/services/seerr/status.js';
+import { hydrateRequestTitle } from '@/services/seerr/titles.js';
 
 export const seerrRequestResource = resource('seerr://request/{requestId}', {
   name: 'seerr-request',
@@ -29,6 +33,12 @@ export const seerrRequestResource = resource('seerr://request/{requestId}', {
   output: z.object({
     requestId: z.number().describe('The request ID.'),
     mediaType: z.enum(['movie', 'tv']).describe('Movie or TV.'),
+    title: z
+      .string()
+      .optional()
+      .describe(
+        'Title of the requested media, joined from the media record; absent when the request carries no tmdbId or the lookup failed.',
+      ),
     tmdbId: z.number().optional().describe('TMDB ID of the media.'),
     requestStatus: StatusRef.describe('Decoded request status {raw,label}.'),
     mediaStatus: StatusRef.optional().describe('Decoded media availability {raw,label}.'),
@@ -69,7 +79,11 @@ export const seerrRequestResource = resource('seerr://request/{requestId}', {
   async handler(params, ctx) {
     const seerr = getSeerrService();
     const raw = await seerr.getRequest(Number.parseInt(params.requestId, 10), ctx);
-    ctx.log.debug('Seerr request resource read', { requestId: params.requestId });
-    return projectRequestDetail(raw);
+    const detail = await hydrateRequestTitle(projectRequestDetail(raw), seerr, ctx);
+    ctx.log.debug('Seerr request resource read', {
+      requestId: params.requestId,
+      titleResolved: detail.title !== undefined,
+    });
+    return detail;
   },
 });

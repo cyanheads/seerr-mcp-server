@@ -162,6 +162,28 @@ describe('SeerrService', () => {
     await expect(getSeerrService().getStatus(ctx)).rejects.toBeDefined();
   });
 
+  /**
+   * A 503 classifies as transient, so the default budget spends four attempts on
+   * it. That is right for a required read and wrong for a best-effort one — the
+   * title join passes `maxRetries: 0` precisely to opt out, so the service has to
+   * actually honor the override rather than accept and ignore it.
+   */
+  it('retries a transient detail read by default and once only when maxRetries is 0', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(503, { message: 'temporarily down' }));
+    const ctx = createMockContext({ tenantId: 'test' });
+
+    await expect(getSeerrService().getMovie(550, ctx, { maxRetries: 0 })).rejects.toBeDefined();
+    expect(fetchMock).toHaveBeenCalledOnce();
+
+    fetchMock.mockClear();
+    await expect(getSeerrService().getTv(1399, ctx, { maxRetries: 0 })).rejects.toBeDefined();
+    expect(fetchMock).toHaveBeenCalledOnce();
+
+    fetchMock.mockClear();
+    await expect(getSeerrService().getMovie(550, ctx)).rejects.toBeDefined();
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+  }, 20_000);
+
   it('parses and returns a successful movie detail payload', async () => {
     fetchMock.mockResolvedValue(
       jsonResponse(200, { id: 1275779, title: 'Disclosure Day', runtime: 145 }),
