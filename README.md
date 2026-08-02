@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.1.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/seerr-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/seerr-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.2-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.1.1-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/seerr-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/seerr-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.2-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -26,7 +26,7 @@ A workflow MCP server over a self-hosted [Jellyseerr](https://github.com/Fallenb
 Two properties make it safe to hand an agent:
 
 - **Guarded writes.** The one mutating tool (`seerr_request_media`) defaults to `mode: preview` — it resolves the title and returns the exact payload that _would_ be submitted without writing anything. The real request fires only on `mode: request`, and asks for an explicit confirmation first when the client supports elicitation.
-- **PII/infra redaction.** Raw Jellyseerr payloads carry operator email, Plex/Jellyfin tokens, internal service URLs, and filesystem paths. A single normalization choke point strips all of it before any tool output — requester objects are projected to `{ id, displayName }`, and root-folder paths are gated behind an explicit `includePaths` flag.
+- **Operator-safe output.** Every payload passes through one normalization layer ([`src/services/seerr/normalizers.ts`](./src/services/seerr/normalizers.ts)) that allow-lists the fields it emits, so operator email, Plex/Jellyfin tokens and media-server IDs, and internal `serviceUrl` hosts never reach the model — requesters are projected to `{ id, displayName }`. Redaction is always on; filesystem paths are the single opt-in, behind `includePaths`.
 
 ## Tools
 
@@ -127,7 +127,6 @@ Jellyseerr-specific:
 
 Agent-friendly output:
 
-- **Mandatory PII/infra redaction** — a single normalization choke point projects requester objects to `{ id, displayName }` and drops operator email, Plex/Jellyfin tokens, internal `serviceUrl`, and filesystem paths before any output reaches the model
 - **Provenance and disclosure** — searches echo the effective query; capped lists disclose truncation; a degraded service leg surfaces a notice instead of silently dropping data
 - **Typed, actionable errors** — `media_not_found`, `request_not_found`, `seasons_required`, `four_k_not_enabled`, `duplicate_request`, and more carry a recovery hint so callers can branch and retry without parsing prose
 
