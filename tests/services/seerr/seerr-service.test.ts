@@ -4,7 +4,8 @@
  * mocked non-OK Response MUST drive the throwing error path (it does, via the
  * service's `request()` pipeline). Covers: 500 "Unable to retrieve movie." →
  * media_not_found (NotFound), 404 "Request not found." → request_not_found
- * (NotFound), the X-Api-Key header, and the settings cache.
+ * (NotFound), the X-Api-Key header, the settings cache, and the wire form of
+ * every query string (Seerr rejects reserved characters it sees undecoded).
  * @module tests/services/seerr/seerr-service.test
  */
 
@@ -52,7 +53,72 @@ describe('SeerrService', () => {
     expect(fetchMock).toHaveBeenCalledOnce();
     const [url, init] = fetchMock.mock.calls[0]!;
     expect(String(url)).toBe('http://seerr.test:5055/api/v1/search?query=Mulan&page=1');
-    expect((init?.headers as Record<string, string>)['X-Api-Key']).toBe('TEST-API-KEY');
+    expect((init!.headers as Record<string, string>)['X-Api-Key']).toBe('TEST-API-KEY');
+  });
+
+  /**
+   * Seerr validates the UNDECODED query string against
+   * `/[:\/?#\[\]@!$&'()*+,;=]/` and 400s on a match, so the wire form is the only
+   * thing that matters here. `URLSearchParams` emits `+` for a space and
+   * `encodeURIComponent` leaves `!'()*` bare — both trip the check.
+   */
+  describe.each([
+    ['space', 'Avengers Doomsday', 'Avengers%20Doomsday'],
+    ['apostrophe', "Ocean's Eleven", 'Ocean%27s%20Eleven'],
+    ['parentheses + hyphen', 'WALL-E (2008)', 'WALL-E%20%282008%29'],
+    ['asterisk', 'M*A*S*H', 'M%2AA%2AS%2AH'],
+    ['exclamation', 'Mamma Mia!', 'Mamma%20Mia%21'],
+    [
+      'ampersand, comma, colon, slash',
+      'Fast & Furious: Tokyo, 1/2',
+      'Fast%20%26%20Furious%3A%20Tokyo%2C%201%2F2',
+    ],
+    ['plus, equals, semicolon, hash, dollar', 'A+B=C;D#E$F', 'A%2BB%3DC%3BD%23E%24F'],
+    ['brackets and at-sign', '[REC] @home', '%5BREC%5D%20%40home'],
+    ['question mark', 'Who Framed Roger Rabbit?', 'Who%20Framed%20Roger%20Rabbit%3F'],
+  ])('percent-encodes the query — %s', (_label, query, encoded) => {
+    it(`sends ${encoded}`, async () => {
+      fetchMock.mockResolvedValue(jsonResponse(200, { page: 1, totalResults: 0, results: [] }));
+      const ctx = createMockContext({ tenantId: 'test' });
+      await getSeerrService().search({ query, page: 1 }, ctx);
+
+      const [url] = fetchMock.mock.calls[0]!;
+      expect(String(url)).toBe(`http://seerr.test:5055/api/v1/search?query=${encoded}&page=1`);
+      // No reserved character survives undecoded in the value Seerr inspects.
+      const value = String(url).split('?')[1]!.split('&')[0]!.slice('query='.length);
+      expect(value).not.toMatch(/[:/?#[\]@!$&'()*+,;=]/);
+    });
+  });
+
+  it('percent-encodes the optional language param and preserves param order', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(200, { page: 1, totalResults: 0, results: [] }));
+    const ctx = createMockContext({ tenantId: 'test' });
+    await getSeerrService().search({ query: 'Amélie', page: 2, language: 'fr-FR' }, ctx);
+
+    expect(String(fetchMock.mock.calls[0]![0])).toBe(
+      'http://seerr.test:5055/api/v1/search?query=Am%C3%A9lie&page=2&language=fr-FR',
+    );
+  });
+
+  it('builds the request-list query through the same encoder, omitting mediaType:all', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(200, { pageInfo: {}, results: [] }));
+    const ctx = createMockContext({ tenantId: 'test' });
+    await getSeerrService().listRequests(
+      {
+        take: 10,
+        skip: 0,
+        filter: 'all',
+        sort: 'added',
+        sortDirection: 'desc',
+        mediaType: 'all',
+        requestedById: 7,
+      },
+      ctx,
+    );
+
+    expect(String(fetchMock.mock.calls[0]![0])).toBe(
+      'http://seerr.test:5055/api/v1/request?take=10&skip=0&filter=all&sort=added&sortDirection=desc&requestedBy=7',
+    );
   });
 
   it('classifies a 500 "Unable to retrieve movie." as media_not_found (NotFound) with a recovery hint', async () => {

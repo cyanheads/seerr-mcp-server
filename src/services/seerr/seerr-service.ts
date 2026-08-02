@@ -44,6 +44,33 @@ const SERVICE_NAME = 'Seerr';
 const SETTINGS_CACHE_KEY = 'seerr:settings:public';
 const SETTINGS_CACHE_TTL_SECONDS = 300;
 
+/**
+ * Percent-encode a query key or value for Seerr. Seerr validates the UNDECODED
+ * query string with `express-openapi-validator`, which rejects any value matching
+ * `/[:\/?#\[\]@!$&'()*+,;=]/` — so neither `URLSearchParams` (form-encodes a space
+ * to `+`, itself reserved) nor bare `encodeURIComponent` (leaves `!`, `'`, `(`,
+ * `)`, `*` intact) is sufficient. Those five are escaped on top of
+ * `encodeURIComponent`, which already covers the rest of the set.
+ */
+function encodeQueryComponent(value: string): string {
+  return encodeURIComponent(value).replace(
+    /[!'()*]/g,
+    (char) => `%${char.charCodeAt(0).toString(16).toUpperCase()}`,
+  );
+}
+
+/**
+ * Build a query string from ordered params, skipping `undefined` values. Every
+ * query-building call site goes through here so a free-text param can never
+ * reach Seerr under-encoded.
+ */
+function buildQuery(params: Record<string, string | number | undefined>): string {
+  return Object.entries(params)
+    .filter(([, value]) => value !== undefined)
+    .map(([key, value]) => `${encodeQueryComponent(key)}=${encodeQueryComponent(String(value))}`)
+    .join('&');
+}
+
 /** Options for a single Seerr request. */
 interface RequestOptions {
   /** Retry backoff base (ms). LAN instance recovers fast; default 300. */
@@ -92,9 +119,12 @@ export class SeerrService {
     params: { query: string; page: number; language?: string },
     ctx: Context,
   ): Promise<RawSearchResponse> {
-    const qs = new URLSearchParams({ query: params.query, page: String(params.page) });
-    if (params.language) qs.set('language', params.language);
-    return this.request<RawSearchResponse>(`/search?${qs.toString()}`, ctx);
+    const qs = buildQuery({
+      query: params.query,
+      page: params.page,
+      language: params.language,
+    });
+    return this.request<RawSearchResponse>(`/search?${qs}`, ctx);
   }
 
   /** `GET /movie/{id}` — movie detail. 500 "Unable to retrieve movie." → media_not_found. */
@@ -120,17 +150,16 @@ export class SeerrService {
 
   /** `GET /request` — list requests with filters. */
   listRequests(params: ListRequestsParams, ctx: Context): Promise<RawRequestListResponse> {
-    const qs = new URLSearchParams({
-      take: String(params.take),
-      skip: String(params.skip),
+    const qs = buildQuery({
+      take: params.take,
+      skip: params.skip,
       filter: params.filter,
       sort: params.sort,
       sortDirection: params.sortDirection,
+      mediaType: params.mediaType && params.mediaType !== 'all' ? params.mediaType : undefined,
+      requestedBy: params.requestedById,
     });
-    if (params.mediaType && params.mediaType !== 'all') qs.set('mediaType', params.mediaType);
-    if (typeof params.requestedById === 'number')
-      qs.set('requestedBy', String(params.requestedById));
-    return this.request<RawRequestListResponse>(`/request?${qs.toString()}`, ctx);
+    return this.request<RawRequestListResponse>(`/request?${qs}`, ctx);
   }
 
   /** `GET /request/{id}` — single request. 404 "Request not found." → request_not_found. */
