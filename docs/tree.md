@@ -1,6 +1,6 @@
 # seerr-mcp-server - Directory Structure
 
-Generated on: 2026-08-02 13:42:40
+Generated on: 2026-08-02 14:25:27
 
 ```text
 seerr-mcp-server/
@@ -149,6 +149,7 @@ seerr-mcp-server/
 │   │       ├── normalizers.ts
 │   │       ├── seerr-service.ts
 │   │       ├── status.ts
+│   │       ├── titles.ts
 │   │       └── types.ts
 │   └── index.ts
 ├── tests/
@@ -158,7 +159,8 @@ seerr-mcp-server/
 │   │   └── seerr/
 │   │       ├── normalizers.test.ts
 │   │       ├── seerr-service.test.ts
-│   │       └── status.test.ts
+│   │       ├── status.test.ts
+│   │       └── titles.test.ts
 │   └── tools/
 │       ├── get-media.tool.test.ts
 │       ├── list-requests.tool.test.ts

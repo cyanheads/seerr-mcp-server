@@ -1,6 +1,6 @@
 {
   "name": "@cyanheads/seerr-mcp-server",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Search Jellyseerr/Overseerr, check availability, and create guarded media requests via MCP. STDIO or Streamable HTTP.",
   "mcpName": "io.github.cyanheads/seerr-mcp-server",
   "type": "module",
@@ -76,9 +76,9 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
-    "@biomejs/biome": "2.5.5",
+    "@biomejs/biome": "2.5.6",
     "@socketsecurity/bun-security-scanner": "^1.1.2",
-    "@types/node": "26.1.1",
+    "@types/node": "26.1.2",
     "depcheck": "^1.4.7",
     "ignore": "^7.0.6",
     "tsc-alias": "^1.9.1",
