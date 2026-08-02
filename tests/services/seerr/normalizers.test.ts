@@ -211,3 +211,40 @@ describe('projectRequestDetail — full request redaction (requestedBy AND modif
     expect(detail.routing.profileName).toBeUndefined();
   });
 });
+
+describe('projectRequestDetail — stateGuidance follows the resolution that was requested', () => {
+  /** An approved 4K request: the 4K copy is downloading while the non-4K pipeline is untouched. */
+  const fourKRequest: RawMediaRequest = {
+    id: 47,
+    type: 'movie',
+    status: 2,
+    is4k: true,
+    createdAt: '2026-06-08T10:50:48.000Z',
+    updatedAt: '2026-06-08T10:50:48.000Z',
+    requestedBy: LEAKY_USER,
+    media: { tmdbId: 1275779, status: 1, status4k: 3 },
+  };
+
+  it('reads status4k for an is4k request instead of the unknown non-4K status', () => {
+    const detail = projectRequestDetail(fourKRequest);
+    expect(detail.mediaStatus).toEqual({ raw: 1, label: 'unknown' });
+    expect(detail.mediaStatus4k).toEqual({ raw: 3, label: 'processing' });
+    expect(detail.stateGuidance).toBe(
+      'Approved and downloading via Radarr/Sonarr. Check back shortly.',
+    );
+  });
+
+  it('reads status for a non-4K request even when status4k is further along', () => {
+    const detail = projectRequestDetail({ ...fourKRequest, id: 48, is4k: false });
+    expect(detail.stateGuidance).toContain('no download has started');
+  });
+
+  it('falls back to status when an is4k request carries no status4k', () => {
+    const detail = projectRequestDetail({
+      ...fourKRequest,
+      media: { tmdbId: 1275779, status: 5 },
+    });
+    expect(detail.mediaStatus4k).toBeUndefined();
+    expect(detail.stateGuidance).toBe('Media is available to watch.');
+  });
+});

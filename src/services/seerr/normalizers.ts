@@ -181,6 +181,7 @@ export interface DomainRequestDetail {
  * `requestedBy` is projected to `{ id, displayName }`; `modifiedBy`, `serviceUrl`,
  * tokens, and paths are dropped by omission. `routing` carries names/IDs only.
  * `title` is intentionally absent — request objects have no title field.
+ * `stateGuidance` reads `status4k` for a 4K request and `status` otherwise.
  */
 export function projectRequestDetail(raw: RawMediaRequest): DomainRequestDetail {
   const mediaType: 'movie' | 'tv' = raw.type === 'tv' ? 'tv' : 'movie';
@@ -190,7 +191,14 @@ export function projectRequestDetail(raw: RawMediaRequest): DomainRequestDetail 
   const mediaStatus4k =
     typeof raw.media?.status4k === 'number' ? decodeMediaStatus(raw.media.status4k) : undefined;
   const seasons = normalizeSeasons(raw);
-  const guidance = stateGuidanceFor(requestStatus, mediaStatus);
+  const is4k = raw.is4k === true;
+  /**
+   * A 4K request downloads through the 4K Radarr/Sonarr service, whose progress
+   * lives on `status4k` — the non-4K `status` describes a separate pipeline and
+   * commonly sits at `unknown` while the 4K copy is already processing.
+   */
+  const availability = is4k && mediaStatus4k ? mediaStatus4k : mediaStatus;
+  const guidance = stateGuidanceFor(requestStatus, availability);
   const tmdbId = raw.media?.tmdbId;
 
   return {
@@ -200,13 +208,13 @@ export function projectRequestDetail(raw: RawMediaRequest): DomainRequestDetail 
     requestStatus,
     ...(mediaStatus ? { mediaStatus } : {}),
     ...(mediaStatus4k ? { mediaStatus4k } : {}),
-    is4k: raw.is4k === true,
+    is4k,
     ...(seasons.length > 0 ? { seasons } : {}),
     requestedBy: raw.requestedBy ? redactUser(raw.requestedBy) : { id: 0, displayName: 'Unknown' },
     routing: {
       ...(typeof raw.serverId === 'number' ? { serverId: raw.serverId } : {}),
       ...(raw.profileName ? { profileName: raw.profileName } : {}),
-      is4k: raw.is4k === true,
+      is4k,
     },
     createdAt: raw.createdAt ?? '',
     updatedAt: raw.updatedAt ?? '',
@@ -214,10 +222,14 @@ export function projectRequestDetail(raw: RawMediaRequest): DomainRequestDetail 
   };
 }
 
-/** Derive a next-step hint from the decoded request + media status. Guidance only — never an ETA. */
+/**
+ * Derive a next-step hint from the decoded request status plus the availability
+ * that tracks THIS request (`status4k` for a 4K request, `status` otherwise).
+ * Guidance only — never an ETA.
+ */
 function stateGuidanceFor(
   requestStatus: DecodedStatus,
-  mediaStatus: DecodedStatus | undefined,
+  availability: DecodedStatus | undefined,
 ): string | undefined {
   switch (requestStatus.label) {
     case 'pending':
@@ -233,7 +245,7 @@ function stateGuidanceFor(
     default:
       return;
   }
-  switch (mediaStatus?.label) {
+  switch (availability?.label) {
     case 'processing':
     case 'pending':
       return 'Approved and downloading via Radarr/Sonarr. Check back shortly.';

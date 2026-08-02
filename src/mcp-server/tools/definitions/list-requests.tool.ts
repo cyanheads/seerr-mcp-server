@@ -90,7 +90,10 @@ export const listRequestsTool = tool('seerr_list_requests', {
             tmdbId: z.number().optional().describe('TMDB ID of the requested media.'),
             requestStatus: StatusRef.describe('Decoded request status {raw,label}.'),
             mediaStatus: StatusRef.optional().describe(
-              'Decoded availability of the underlying media {raw,label} (from media.status).',
+              'Decoded availability of the non-4K copy {raw,label} (from media.status).',
+            ),
+            mediaStatus4k: StatusRef.optional().describe(
+              'Decoded availability of the 4K copy {raw,label} (from media.status4k). The 4K copy downloads through a separate Radarr/Sonarr service, so this is the field that tracks an is4k request.',
             ),
             is4k: z.boolean().describe('Whether this is a 4K request.'),
             seasons: z
@@ -157,12 +160,15 @@ export const listRequestsTool = tool('seerr_list_requests', {
       const tmdbId = r.media?.tmdbId;
       const mediaStatus =
         typeof r.media?.status === 'number' ? decodeMediaStatus(r.media.status) : undefined;
+      const mediaStatus4k =
+        typeof r.media?.status4k === 'number' ? decodeMediaStatus(r.media.status4k) : undefined;
       return {
         requestId: r.id,
         mediaType,
         ...(typeof tmdbId === 'number' ? { tmdbId } : {}),
         requestStatus: decodeRequestStatus(r.status ?? 1),
         ...(mediaStatus ? { mediaStatus } : {}),
+        ...(mediaStatus4k ? { mediaStatus4k } : {}),
         is4k: r.is4k === true,
         ...(seasons.length > 0 ? { seasons } : {}),
         requestedBy: r.requestedBy ? redactUser(r.requestedBy) : { id: 0, displayName: 'Unknown' },
@@ -206,6 +212,7 @@ export const listRequestsTool = tool('seerr_list_requests', {
         `**Status:** ${statusText(r.requestStatus)}`,
       ];
       if (r.mediaStatus) facts.push(`**Media:** ${statusText(r.mediaStatus)}`);
+      if (r.mediaStatus4k) facts.push(`**Media 4K:** ${statusText(r.mediaStatus4k)}`);
       facts.push(`**Requested by:** ${r.requestedBy.displayName} (id ${r.requestedBy.id})`);
       if (r.createdAt) facts.push(`**Created:** ${r.createdAt}`);
       lines.push(facts.join(' | '));

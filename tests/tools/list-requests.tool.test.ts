@@ -58,6 +58,37 @@ describe('seerr_list_requests', () => {
     expect(json).not.toContain('203.0.113.10');
   });
 
+  /**
+   * The 4K copy downloads through a separate Radarr/Sonarr service, so a 4K row whose
+   * non-4K `status` still reads `unknown` must surface the 4K progress alongside it.
+   */
+  it('surfaces status4k so a 4K row is not reported as merely unknown', async () => {
+    service.listRequests.mockResolvedValue({
+      pageInfo: { results: 1 },
+      results: [
+        {
+          id: 47,
+          type: 'movie',
+          status: 2,
+          is4k: true,
+          createdAt: '2026-06-08T10:50:48.000Z',
+          requestedBy: { id: 1, username: 'mediauser' },
+          media: { tmdbId: 1275779, status: 1, status4k: 3 },
+        },
+      ],
+    });
+    const ctx = createMockContext({ tenantId: 'test' });
+    const result = await listRequestsTool.handler(listRequestsTool.input.parse({}), ctx);
+
+    expect(result.requests[0]).toMatchObject({
+      is4k: true,
+      mediaStatus: { raw: 1, label: 'unknown' },
+      mediaStatus4k: { raw: 3, label: 'processing' },
+    });
+    const text = (listRequestsTool.format!(result)[0] as { text: string }).text;
+    expect(text).toContain('**Media 4K:** processing (3)');
+  });
+
   it('emits a notice when no requests match', async () => {
     service.listRequests.mockResolvedValue({ pageInfo: { results: 0 }, results: [] });
     const ctx = createMockContext({ tenantId: 'test' });

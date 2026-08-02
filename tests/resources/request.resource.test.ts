@@ -50,6 +50,33 @@ describe('seerr://request/{requestId} resource', () => {
     expect(JSON.stringify(result)).not.toContain('leak@example.com');
   });
 
+  it('derives 4K guidance from status4k, matching seerr_request_status', async () => {
+    service.getRequest.mockResolvedValue({
+      id: 47,
+      type: 'movie',
+      status: 2,
+      is4k: true,
+      createdAt: '2026-06-08T10:50:48.000Z',
+      updatedAt: '2026-06-08T10:50:48.000Z',
+      requestedBy: { id: 1, username: 'mediauser' },
+      media: { tmdbId: 1275779, status: 1, status4k: 3 },
+    });
+    const ctx = createMockContext({
+      tenantId: 'test',
+      errors: seerrRequestResource.errors,
+      uri: new URL('seerr://request/47'),
+    });
+    const params = seerrRequestResource.params.parse({ requestId: '47' });
+    const result = await seerrRequestResource.handler(params, ctx);
+
+    expect(result).toMatchObject({
+      is4k: true,
+      mediaStatus: { raw: 1, label: 'unknown' },
+      mediaStatus4k: { raw: 3, label: 'processing' },
+    });
+    expect(result.stateGuidance).toContain('downloading');
+  });
+
   it('rejects a non-numeric requestId at the params schema', () => {
     expect(() => seerrRequestResource.params.parse({ requestId: 'abc' })).toThrow();
   });

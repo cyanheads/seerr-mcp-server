@@ -72,6 +72,24 @@ describe('seerr_request_status', () => {
     expect(result.stateGuidance).toContain('downloading');
   });
 
+  it('derives the hint from status4k on a 4K request whose non-4K status is unknown', async () => {
+    service.getRequest.mockResolvedValue({
+      id: 47,
+      type: 'movie',
+      status: 2,
+      is4k: true,
+      media: { tmdbId: 1275779, status: 1, status4k: 3 },
+    });
+    const ctx = createMockContext({ tenantId: 'test', errors: requestStatusTool.errors });
+    const result = await requestStatusTool.handler(
+      requestStatusTool.input.parse({ requestId: 47 }),
+      ctx,
+    );
+    expect(result.mediaStatus).toEqual({ raw: 1, label: 'unknown' });
+    expect(result.mediaStatus4k).toEqual({ raw: 3, label: 'processing' });
+    expect(result.stateGuidance).toContain('downloading');
+  });
+
   it('decodes a failed request (status 4) and guides the user to retry in the Seerr UI', async () => {
     service.getRequest.mockResolvedValue({
       id: 51,
