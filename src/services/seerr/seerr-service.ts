@@ -169,7 +169,7 @@ export class SeerrService {
       skip: params.skip,
       filter: params.filter,
       sort: params.sort,
-      sortDirection: params.sortDirection,
+      /** `sortDirection` omitted — Overseerr rejects unknown query params; only Jellyseerr has it. */
       mediaType: params.mediaType && params.mediaType !== 'all' ? params.mediaType : undefined,
       requestedBy: params.requestedById,
     });
