@@ -19,6 +19,9 @@ const { seerrRequestResource } = await import(
   '@/mcp-server/resources/definitions/request.resource.js'
 );
 
+/** `params` is optional on the resource-definition type; this resource declares one. */
+const resourceParams = seerrRequestResource.params!;
+
 describe('seerr://request/{requestId} resource', () => {
   beforeEach(() => vi.clearAllMocks());
 
@@ -38,7 +41,7 @@ describe('seerr://request/{requestId} resource', () => {
       errors: seerrRequestResource.errors,
       uri: new URL('seerr://request/45'),
     });
-    const params = seerrRequestResource.params.parse({ requestId: '45' });
+    const params = resourceParams.parse({ requestId: '45' });
     const result = await seerrRequestResource.handler(params, ctx);
 
     expect(result).toMatchObject({
@@ -67,7 +70,7 @@ describe('seerr://request/{requestId} resource', () => {
       errors: seerrRequestResource.errors,
       uri: new URL('seerr://request/47'),
     });
-    const params = seerrRequestResource.params.parse({ requestId: '47' });
+    const params = resourceParams.parse({ requestId: '47' });
     const result = await seerrRequestResource.handler(params, ctx);
 
     expect(result).toMatchObject({
@@ -94,7 +97,7 @@ describe('seerr://request/{requestId} resource', () => {
       errors: seerrRequestResource.errors,
       uri: new URL('seerr://request/47'),
     });
-    const params = seerrRequestResource.params.parse({ requestId: '47' });
+    const params = resourceParams.parse({ requestId: '47' });
     const result = await seerrRequestResource.handler(params, ctx);
 
     expect(service.getMovie).toHaveBeenCalledWith(299534, ctx, { maxRetries: 0 });
@@ -116,7 +119,7 @@ describe('seerr://request/{requestId} resource', () => {
       errors: seerrRequestResource.errors,
       uri: new URL('seerr://request/51'),
     });
-    const params = seerrRequestResource.params.parse({ requestId: '51' });
+    const params = resourceParams.parse({ requestId: '51' });
     const result = await seerrRequestResource.handler(params, ctx);
 
     expect(service.getMovie).not.toHaveBeenCalled();
@@ -140,7 +143,7 @@ describe('seerr://request/{requestId} resource', () => {
       errors: seerrRequestResource.errors,
       uri: new URL('seerr://request/53'),
     });
-    const params = seerrRequestResource.params.parse({ requestId: '53' });
+    const params = resourceParams.parse({ requestId: '53' });
     const result = await seerrRequestResource.handler(params, ctx);
 
     expect(result.title).toBeUndefined();
@@ -148,7 +151,7 @@ describe('seerr://request/{requestId} resource', () => {
   });
 
   it('rejects a non-numeric requestId at the params schema', () => {
-    expect(() => seerrRequestResource.params.parse({ requestId: 'abc' })).toThrow();
+    expect(() => resourceParams.parse({ requestId: 'abc' })).toThrow();
   });
 
   it('bubbles request_not_found for a missing request', async () => {
@@ -162,7 +165,7 @@ describe('seerr://request/{requestId} resource', () => {
       errors: seerrRequestResource.errors,
       uri: new URL('seerr://request/999999'),
     });
-    const params = seerrRequestResource.params.parse({ requestId: '999999' });
+    const params = resourceParams.parse({ requestId: '999999' });
     await expect(seerrRequestResource.handler(params, ctx)).rejects.toMatchObject({
       code: JsonRpcErrorCode.NotFound,
       data: { reason: 'request_not_found' },

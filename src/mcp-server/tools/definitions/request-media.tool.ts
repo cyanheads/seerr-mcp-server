@@ -2,13 +2,16 @@
  * @fileoverview seerr_request_media — the guarded write, the only mutation in the
  * surface. It resolves and PREVIEWS a request payload by default (mode: preview,
  * no write), and creates the request only on mode:request AND an explicit
- * ctx.elicit confirmation. "Download X" means "create a Seerr request for X" —
- * never a direct Radarr/Sonarr call.
+ * confirmation collected over a multi-round-trip input round. "Download X" means
+ * "create a Seerr request for X" — never a direct Radarr/Sonarr call.
  *
  * Three-layer guard:
  *   1. mode:preview is the blast-radius-safe default (resolve + validate, no POST).
- *   2. mode:request triggers a ctx.elicit confirmation when the client supports it.
- *   3. destructiveHint:true is the fallback signal for non-interactive clients.
+ *   2. mode:request suspends on ctx.requestInput and writes only when the caller
+ *      re-enters the handler with a schema-valid acceptance on ctx.inputs. There is
+ *      no "proceed anyway" branch: a client that never answers leaves the write
+ *      un-run, which fails safe.
+ *   3. destructiveHint:true surfaces the risk in client-side approval flows.
  *
  * Capability validation (4K enabled? seasons valid? partial allowed?) runs LOCALLY
  * against the cached /settings/public BEFORE any POST, so a bad request fails with
@@ -16,7 +19,7 @@
  * @module mcp-server/tools/definitions/request-media.tool
  */
 
-import { tool, z } from '@cyanheads/mcp-ts-core';
+import { inputRequired, tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { redactOpenRequest } from '@/services/seerr/normalizers.js';
 import { getSeerrService } from '@/services/seerr/seerr-service.js';
@@ -28,10 +31,25 @@ import {
 } from '@/services/seerr/status.js';
 import type { CreateRequestBody, RawMediaInfo } from '@/services/seerr/types.js';
 
+/** Identifier the confirmation round is filed under across both rounds of the write. */
+const CONFIRM_KEY = 'confirm';
+
+/**
+ * Shape of the confirmation response. Passed to BOTH the request and the read:
+ * the SDK never re-validates a response against the schema its request advertised,
+ * and the payload is client-mediated, so "the user answered" is not "the user
+ * authored these exact fields".
+ */
+const ConfirmSchema = z.object({
+  confirmed: z
+    .boolean()
+    .describe('True submits the request to Seerr. Anything else cancels it unsubmitted.'),
+});
+
 export const requestMediaTool = tool('seerr_request_media', {
   title: 'seerr-mcp-server: request media',
   description:
-    'Create a Seerr media request — the guarded write. Defaults to mode:preview, which resolves the exact title and returns the request payload that WOULD be submitted WITHOUT creating anything; pass mode:request to actually submit (a confirmation is requested first when the client supports it). Treat "download X" as "create a Seerr request for X". Always preview first unless the title is already confirmed.',
+    'Create a Seerr media request — the guarded write. Defaults to mode:preview, which resolves the exact title and returns the request payload that WOULD be submitted WITHOUT creating anything; pass mode:request to actually submit, which asks for an explicit confirmation and submits only once that confirmation comes back accepted. Treat "download X" as "create a Seerr request for X". Always preview first unless the title is already confirmed.',
   annotations: {
     readOnlyHint: false,
     destructiveHint: true,
@@ -209,7 +227,7 @@ export const requestMediaTool = tool('seerr_request_media', {
     {
       reason: 'request_cancelled',
       code: JsonRpcErrorCode.InvalidParams,
-      when: 'the user declined the elicit confirmation.',
+      when: 'the confirmation round came back declined, cancelled, or without a valid acceptance.',
       recovery:
         'Re-run with mode:request and confirm the prompt if you intend to submit the request.',
     },
@@ -295,8 +313,15 @@ export const requestMediaTool = tool('seerr_request_media', {
       return { mode: 'preview' as const, ...baseOutput };
     }
 
-    // REQUEST — guarded write. Layer 2: elicit confirmation when the client supports it.
-    if (ctx.elicit) {
+    /**
+     * REQUEST — guarded write. Layer 2: the confirmation round. First pass through
+     * this arm carries no response for CONFIRM_KEY, so the handler suspends and is
+     * re-entered once the caller has answered. Anything back that is not a
+     * schema-valid `confirmed: true` — declined, cancelled, another response kind,
+     * or unparseable — is terminal: re-issuing the same request would loop until the
+     * round budget runs out, and it is never consent.
+     */
+    if (ctx.inputs.view(CONFIRM_KEY).kind === 'missing') {
       const seasonSummary =
         input.mediaType === 'tv'
           ? input.seasons === 'all'
@@ -305,18 +330,22 @@ export const requestMediaTool = tool('seerr_request_media', {
               ? ` (seasons ${input.seasons.join(', ')})`
               : ''
           : '';
-      const confirm = await ctx.elicit(
-        `Create a Seerr request for "${title}"${input.is4k ? ' (4K)' : ''}${seasonSummary}? This adds it to your Radarr/Sonarr download queue.`,
-        z.object({ confirmed: z.literal(true).describe('Set true to submit the request.') }),
-      );
-      if (confirm.action !== 'accept') {
-        throw ctx.fail('request_cancelled', 'Request cancelled before submission.', {
-          ...ctx.recoveryFor('request_cancelled'),
-        });
-      }
+      return ctx.requestInput({
+        inputRequests: {
+          [CONFIRM_KEY]: inputRequired.elicit({
+            message: `Create a Seerr request for "${title}"${input.is4k ? ' (4K)' : ''}${seasonSummary}? This adds it to your Radarr/Sonarr download queue.`,
+            requestedSchema: ConfirmSchema,
+          }),
+        },
+      });
+    }
+    if (ctx.inputs.accepted(CONFIRM_KEY, ConfirmSchema)?.confirmed !== true) {
+      throw ctx.fail('request_cancelled', 'Request cancelled before submission.', {
+        ...ctx.recoveryFor('request_cancelled'),
+      });
     }
 
-    // Layer 1+3: preview default already passed; destructiveHint covers non-elicit clients.
+    // Layer 1+3: preview default and the confirmation round both passed.
     let created: {
       requestId: number;
       requestStatus: ReturnType<typeof decodeRequestStatus>;

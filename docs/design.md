@@ -50,7 +50,7 @@ Seerr exposes OpenAPI 3.0.2 at `/api/v1` (base path). The local instance probed 
 - **Auth:** single `X-Api-Key` header, value from `SEERR_API_KEY`. No cookie/credential auth — `/auth/*` is probe-only and never wired into the server.
 - **Base URL:** `SEERR_BASE_URL` (e.g. `http://localhost:5055`); the service appends `/api/v1`.
 - **Read + guarded-request only.** First release deliberately excludes everything `X-Api-Key`'s admin reach makes *possible*: user/admin management, settings updates, sync jobs, media/file deletion, issue management, watchlist/blocklist writes, and request approval/decline. See **Admin-scope exclusions**.
-- **Two-step guarded write.** `seerr_request_media` defaults to `mode: preview` (resolve + preview, no POST). The actual `POST /request` fires only on `mode: request`, gated by `ctx.elicit` confirmation when the client supports it, with `destructiveHint` as the fallback signal for non-interactive clients.
+- **Two-step guarded write.** `seerr_request_media` defaults to `mode: preview` (resolve + preview, no POST). The actual `POST /request` fires only on `mode: request`, gated by a `ctx.requestInput` confirmation round that must come back accepted, with `destructiveHint` surfacing the risk in client-side approval flows.
 - **Status decoding everywhere.** Every output that carries a request or media status emits both the decoded label and the raw number. Request status: `1=pending`, `2=approved`, `3=declined`. Media status: `1=unknown`, `2=pending`, `3=processing`, `4=partially_available`, `5=available`, `6=deleted`. Media carries a **second** `status4k` field on the same scale — decode it too.
 - **Error normalization.** Seerr returns **HTTP 500 `{"message":"Unable to retrieve movie."}`** for a missing movie (confirmed live). Map to a domain `media_not_found` with a search-recovery hint — never surface a raw 500.
 - **PII / infra redaction.** Raw Seerr objects leak operator data (see **PII & path redaction**). Project `User` → `{ id, displayName }`, drop tokens/email/avatars; strip `serviceUrl`/`serviceUrl4k` (internal host:port); redact Radarr/Sonarr `activeDirectory` and root-folder `path` unless explicitly requested.
@@ -124,7 +124,7 @@ Redaction lives in the service layer's normalizers, not in `format()` — so bot
 | User / settings / sync | `/user/*`, `/settings/*` (writes), sync jobs | Admin management. Out of scope. |
 | Issues, watchlist, blocklist | `/issue/*`, `/watchlist/*`, `/blocklist/*` | Separate workflows, no demand. |
 
-The only write in the surface is `POST /request` — and it is double-guarded (preview default + elicit). `/settings/public` and `/status` are read for capability context only (folded into `seerr_service_options`, no standalone tool).
+The only write in the surface is `POST /request` — and it is double-guarded (preview default + confirmation round). `/settings/public` and `/status` are read for capability context only (folded into `seerr_service_options`, no standalone tool).
 
 ---
 
@@ -393,29 +393,35 @@ z.object({
 | 1 | `GET /settings/public` (cached) | Read `movie4kEnabled`/`series4kEnabled`/`partialRequestsEnabled`/`enableSpecialEpisodes` for capability + validation | always |
 | 2 | `GET /movie/{id}` or `/tv/{id}` | Resolve title/year, read `mediaInfo` for existing requests | always |
 | 3 | Build `payload`, validate (4K allowed? seasons valid? partial allowed?) | Local validation → typed errors before any write | always |
-| 4 | `ctx.elicit` confirmation | Human confirms the resolved title + payload before the POST | `request` (when `ctx.elicit` present) |
+| 4 | `ctx.requestInput` confirmation round | Human confirms the resolved title + payload before the POST; the handler suspends and is re-entered with the answer | `request` only |
 | 5 | `POST /request` | Create the request | `request` only |
 | 6 | Decode response, project, return `created` | Post-write state for chaining | `request` only |
 
 Settings (step 1) cached in `ctx.state` with a short TTL (instance config rarely changes) to avoid a round-trip on every preview.
 
-**Elicitation (guarded write):**
+**Confirmation round (guarded write):**
 ```ts
 annotations: { destructiveHint: true, openWorldHint: true, idempotentHint: false },
 // ...
-if (input.mode === 'request' && ctx.elicit) {
-  const confirm = await ctx.elicit(
-    `Create a Seerr request for "${resolved.title}"${input.is4k ? ' (4K)' : ''}` +
-      `${seasonSummary}? This adds it to your Radarr/Sonarr download queue.`,
-    z.object({ confirmed: z.literal(true).describe('Set true to submit the request.') }),
-  );
-  if (confirm.action !== 'accept') {
-    throw ctx.fail('request_cancelled', 'Request cancelled before submission.');
-  }
+// First pass through the request arm carries no response — suspend and ask.
+if (ctx.inputs.view(CONFIRM_KEY).kind === 'missing') {
+  return ctx.requestInput({
+    inputRequests: {
+      [CONFIRM_KEY]: inputRequired.elicit({
+        message: `Create a Seerr request for "${resolved.title}"${input.is4k ? ' (4K)' : ''}` +
+          `${seasonSummary}? This adds it to your Radarr/Sonarr download queue.`,
+        requestedSchema: ConfirmSchema,
+      }),
+    },
+  });
 }
-// POST proceeds; destructiveHint covers clients without elicit
+// Re-entered. Anything that is not a schema-valid acceptance is terminal, never a re-ask.
+if (ctx.inputs.accepted(CONFIRM_KEY, ConfirmSchema)?.confirmed !== true) {
+  throw ctx.fail('request_cancelled', 'Request cancelled before submission.');
+}
+// POST proceeds.
 ```
-`mode: preview` default is the blast-radius safe default; `mode: request` + elicit is the explicit, confirmed path. Both layers documented in the handler so a maintainer doesn't assume elicit always runs.
+`mode: preview` default is the blast-radius safe default; `mode: request` plus an accepted confirmation is the explicit, confirmed path. The schema is passed to both the request and the read because the SDK never re-validates the response against the schema its request advertised. There is no "proceed anyway when the round is unavailable" branch — `ctx.requestInput` is present on every transport and both protocol eras, so a client that never answers simply leaves the write un-run. That requires `MCP_SESSION_MODE` to resolve to `stateful` under HTTP: a 2025-era client answers over a live session, which `stateless` has no way to hold open.
 
 **Errors (typed contract):**
 ```ts
@@ -439,7 +445,7 @@ errors: [
     when: 'Seerr rejects the POST because an identical request already exists',
     recovery: 'Check the existingRequest in this output; track it with seerr_request_status instead of re-requesting.' },
   { reason: 'request_cancelled', code: JsonRpcErrorCode.InvalidParams,
-    when: 'the user declined the elicit confirmation',
+    when: 'the confirmation round came back declined, cancelled, or without a valid acceptance',
     recovery: 'Re-run with mode:request and confirm if you intend to submit.' },
 ]
 ```
@@ -655,7 +661,7 @@ await createApp({
 1. **Config + server setup** — `server-config.ts` (`SEERR_BASE_URL`/`SEERR_API_KEY`/timeout), wire `createApp` identity, drop echo definitions.
 2. **`SeerrService`** — client methods, `status.ts` decoders, `errors.ts` classifier (the 500→`media_not_found` map), `normalizers.ts` (User projection + path/URL redaction), `types.ts`. Independently testable against the live instance (read-only).
 3. **Read-only tools** — `seerr_search_media`, `seerr_get_media`, `seerr_list_requests`, `seerr_request_status`, `seerr_service_options`. Each ships with a test using `createMockContext`, including a **sparse-payload case** (untracked title → no `mediaInfo`) per the framework checklist.
-4. **Write tool** — `seerr_request_media`: preview arm first (pure resolve+validate, fully testable without writing), then the elicit-guarded `request` arm. Validation (4K/seasons/partial) tested against cached settings; the POST path tested with a faked service (never the live instance).
+4. **Write tool** — `seerr_request_media`: preview arm first (pure resolve+validate, fully testable without writing), then the confirmation-guarded `request` arm. Validation (4K/seasons/partial) tested against cached settings; the POST path tested with a faked service (never the live instance).
 5. **Resource** — `seerr://request/{requestId}` reusing the service + normalizers.
 6. **Polish** — `polish-docs-meta` (README, badges, CHANGELOG, server.json/manifest env vars), `devcheck`, `security-pass` (output injection on title/overview strings, the PII redaction choke point, the guarded-write blast radius).
 
@@ -667,7 +673,7 @@ Each step is independently testable; read-only steps (2–3, 5) verify against t
 
 1. **Six tools, no more.** The idea.md sketch maps 1:1 to the surface — each is a distinct agent action (discover / confirm / list / request / track / understand-routing). No tool was cut; none added. `/status` and `/settings/public` fold into `seerr_service_options` (capability context) and the request tool's validation rather than a standalone status tool — version/flags are only useful *attached to* a routing or request decision.
 
-2. **Guarded write = preview default + elicit + destructiveHint, three layers.** `mode: preview` is the blast-radius-safe default (a sloppy call shows the payload, writes nothing). `mode: request` triggers `ctx.elicit` confirmation when the client supports it. `destructiveHint: true` is the fallback for non-interactive clients whose approval flow reads annotations. Local pre-validation (4K/seasons/partial, from cached settings) means most bad requests fail *before* the POST with an actionable error, not as a failed write. This matches the design skill's workflow-safety pattern exactly.
+2. **Guarded write = preview default + confirmation round + destructiveHint, three layers.** `mode: preview` is the blast-radius-safe default (a sloppy call shows the payload, writes nothing). `mode: request` suspends on `ctx.requestInput` and writes only once re-entered with a schema-valid acceptance. `destructiveHint: true` surfaces the risk in client-side approval flows. Local pre-validation (4K/seasons/partial, from cached settings) means most bad requests fail *before* the POST with an actionable error, not as a failed write. This matches the design skill's workflow-safety pattern exactly.
 
 3. **Status is always `{ raw, label }`, never a bare number or string.** Decoding both halves (request status + media status, plus the separate `status4k`) is the single most repeated requirement in idea.md. Centralizing it in `status.ts` and typing every status field as `StatusRef` makes it impossible to leak a raw number to the agent, while preserving the raw value for debugging. Unknown codes degrade to `{raw:n, label:'unrecognized'}` — forward-compatible with new Seerr statuses.
 
@@ -775,7 +781,7 @@ Live probe of `/service/sonarr/0` returned `languageProfiles: null`. Added to sp
 - Status decoding tables (request: 1-3, media: 1-6) — matches OpenAPI spec and live payloads.
 - HTTP 500 `{"message":"Unable to retrieve movie."}` for missing TMDB IDs — confirmed live.
 - `numberOfSeasons` plural on TV detail — confirmed live (`/tv/1399`).
-- Guarded write design (preview default + elicit + `destructiveHint`) — structurally sound.
+- Guarded write design (preview default + confirmation round + `destructiveHint`) — structurally sound.
 - `truncated`/`shown`/`cap` declared optional (correct — avoids -32007 on non-truncated results). `totalCount` via `.total()` required.
 - `serviceUrl`/`serviceUrl4k` in `media` — confirmed live (internal host:port URL, redacted from this doc).
 - Admin-scope exclusions complete.

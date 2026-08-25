@@ -2,9 +2,9 @@
 
 **Server:** seerr-mcp-server
 **Version:** 0.1.2
-**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.11.0`
+**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.12.3`
 **Engines:** Bun ≥1.3.0, Node ≥24.0.0
-**MCP SDK:** `@modelcontextprotocol/sdk` ^1.29.0
+**MCP SDK:** `@modelcontextprotocol/server` ^2.0.0
 **Zod:** ^4.4.3
 
 > **Read the framework docs first:** `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` contains the full API reference — builders, Context, error codes, exports, patterns. This file covers server-specific conventions only.
@@ -19,8 +19,8 @@ A workflow MCP server over a self-hosted Jellyseerr/Overseerr instance: **search
 
 **Two invariants that must never regress:**
 
-1. **Guarded write.** `seerr_request_media` is the only mutation. It defaults to `mode: preview` (resolve + validate, no POST); the real write fires only on `mode: request`, behind a `ctx.elicit` confirmation, with `destructiveHint: true` as the non-interactive fallback. Capability validation (4K/seasons/partial) runs locally against cached settings before any POST.
-2. **PII/infra redaction.** Every raw Jellyseerr payload is projected through `src/services/seerr/normalizers.ts` — the single choke point — before output. It allow-lists fields: `User` → `{ id, displayName }`, and drops operator email, Plex/Jellyfin tokens, `serviceUrl`, `vapidPublic`, and filesystem paths (gated behind `includePaths`). The base URL and API key live only in config and never appear in output. Redaction lives in normalizers, not `format()`, so both `structuredContent` and `content[]` are clean.
+1. **Guarded write.** `seerr_request_media` is the only mutation. It defaults to `mode: preview` (resolve + validate, no POST); the real write fires only on `mode: request` and only once the handler is re-entered with a schema-valid acceptance on `ctx.inputs`, with `destructiveHint: true` surfacing the risk in client-side approval flows. There is no branch that proceeds without an acceptance — a client that never answers leaves the write un-run. Capability validation (4K/seasons/partial) runs locally against cached settings before any POST. `MCP_SESSION_MODE` must resolve to `stateful`: the round trip needs a live session for 2025-era clients, and `stateless` refuses it.
+2. **PII/infra redaction.** Every raw Jellyseerr payload is projected through `src/services/seerr/normalizers.ts` — the single choke point — before output. It allow-lists fields: `User` → `{ id, displayName }`, and drops operator email, Plex/Jellyfin tokens, `serviceUrl`, `vapidPublic`, and filesystem paths (gated behind `includePaths`). The base URL and API key live only in config and never appear in output. Redaction lives in normalizers, not `format()`, so both `structuredContent` and `content[]` are clean. `ctx.log` is a third output surface — it is dual-sink as of mcp-ts-core 0.12.0, mirroring every call to the client as `notifications/message` — so log only classified reasons and the caller's own inputs, never a raw upstream or network message.
 
 The authoritative tool surface, live API quirks, and status-decoding tables are in [`docs/design.md`](docs/design.md).
 
@@ -31,7 +31,7 @@ The authoritative tool surface, live API quirks, and status-decoding tables are 
 - **Logic throws, framework catches.** Tool/resource handlers are pure — throw on failure, no `try/catch`. Plain `Error` is fine; the framework catches, classifies, and formats. Use error factories (`notFound()`, `validationError()`, etc.) when the error code matters.
 - **Use `ctx.log`** for request-scoped logging. No `console` calls.
 - **Use `ctx.state`** for tenant-scoped storage. Never access persistence directly.
-- **Check `ctx.elicit`** for presence before calling.
+- **Need input the caller didn't supply?** `return ctx.requestInput(...)` and read `ctx.inputs` when the handler is re-entered. Never `await` for user input mid-handler.
 - **Secrets in env vars only** — never hardcoded.
 - **Close the loop on issues.** When implementing work tracked by a GitHub issue, comment on the issue with what landed and close it. Do both — a comment without a close leaves stale issues open; a close without a comment leaves no record of what shipped. The comment is for future readers — state the concrete changes, not the conversation that produced them.
 
@@ -178,10 +178,12 @@ Handlers receive a unified `ctx` object. Key properties:
 
 | Property | Description |
 |:---------|:------------|
-| `ctx.log` | Request-scoped logger — `.debug()`, `.info()`, `.notice()`, `.warning()`, `.error()`. Auto-correlates requestId, traceId, tenantId. |
+| `ctx.log` | Request-scoped logger — `.debug()`, `.info()`, `.notice()`, `.warning()`, `.error()`. Auto-correlates requestId, traceId, tenantId. Dual-sink: Pino **and** `notifications/message` to the client, so treat it as client-visible. |
 | `ctx.state` | Tenant-scoped KV — used to cache `/settings/public` + `/status` with a short TTL so capability checks don't round-trip on every preview. |
-| `ctx.elicit` | The guarded-write confirmation surface — `seerr_request_media` calls it on `mode: request` before the POST. **Check for presence first:** `if (ctx.elicit) { ... }` |
+| `ctx.requestInput` | Suspend and ask the caller for more input — `return ctx.requestInput({ inputRequests: { key: inputRequired.elicit({ message, requestedSchema }) } })`. Never returns; the handler is re-entered with the answers. Always present. The guarded-write confirmation on `mode: request` runs through it. |
+| `ctx.inputs` | Reader over a retried request's responses — `.accepted(key, schema)`, `.view(key)`, `.state()`, `.dropped`. Empty on the first round. Pass the schema to `.accepted()`: the SDK never re-validates what the client sent back. |
 | `ctx.enrich` | Output enrichment — `.total(n)`, `.echo(query)`, `.truncated({ shown, cap })`, `.notice(msg)` for capped-list disclosure and effective-query echo. |
+| `ctx.content` | Non-text content blocks — `.image(data, mimeType)`, `.audio(data, mimeType)`, or `ctx.content(block)` for a raw block. Prepended to `content[]` after `format()`; never enters `structuredContent`. |
 | `ctx.fail` / `ctx.recoveryFor` | Typed-error contract throw + recovery-metadata lookup against each tool's `errors[]`. |
 | `ctx.signal` | `AbortSignal` for cancellation. |
 | `ctx.requestId` | Unique request ID. |

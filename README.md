@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.1.2-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/seerr-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/seerr-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.2-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.1.2-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.0.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/seerr-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/seerr-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.0-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -25,7 +25,7 @@ A workflow MCP server over a self-hosted [Jellyseerr](https://github.com/Fallenb
 
 Two properties make it safe to hand an agent:
 
-- **Guarded writes.** The one mutating tool (`seerr_request_media`) defaults to `mode: preview` — it resolves the title and returns the exact payload that _would_ be submitted without writing anything. The real request fires only on `mode: request`, and asks for an explicit confirmation first when the client supports elicitation.
+- **Guarded writes.** The one mutating tool (`seerr_request_media`) defaults to `mode: preview` — it resolves the title and returns the exact payload that _would_ be submitted without writing anything. The real request fires only on `mode: request`, which asks for an explicit confirmation and submits only once that confirmation comes back accepted.
 - **Operator-safe output.** Every payload passes through one normalization layer ([`src/services/seerr/normalizers.ts`](./src/services/seerr/normalizers.ts)) that allow-lists the fields it emits, so operator email, Plex/Jellyfin tokens and media-server IDs, and internal `serviceUrl` hosts never reach the model — requesters are projected to `{ id, displayName }`. Redaction is always on; filesystem paths are the single opt-in, behind `includePaths`.
 
 ## Tools
@@ -37,7 +37,7 @@ Six tools covering the request workflow — discover (`search`) → confirm (`ge
 | `seerr_search_media` | Search movies and TV by title; returns ranked matches with TMDB ID, year, overview, and decoded availability when Jellyseerr already tracks the title. The required first step before requesting. |
 | `seerr_get_media` | Fetch exact movie/show details by TMDB ID + media type to confirm the title before a write; for TV, a per-season summary or one season's episode list. |
 | `seerr_list_requests` | List recent requests with status/type/requester filters; echoes the applied filters and decodes every numeric status. Titles are opt-in via `includeTitles`. |
-| `seerr_request_media` | **Guarded write.** Previews the request payload by default (`mode: preview`); creates the request only on `mode: request` with an elicited confirmation. |
+| `seerr_request_media` | **Guarded write.** Previews the request payload by default (`mode: preview`); creates the request only on `mode: request`, and only after an accepted confirmation. |
 | `seerr_request_status` | Fetch one request by ID — title, decoded request + media availability (incl. 4K), requester, routing summary, and a state-tuned next-step hint. |
 | `seerr_service_options` | Summarize configured Radarr/Sonarr services, default quality profiles, and instance capability flags (4K, partial requests, specials, media server). Filesystem paths redacted unless `includePaths`. |
 
@@ -82,8 +82,10 @@ Review recent requests and their lifecycle. Wraps `GET /request`.
 The only mutation in the surface, and it is triple-guarded:
 
 1. **`mode: preview` (default)** resolves the title and returns the exact `POST /request` payload that _would_ be submitted — no write. A sloppy call shows the payload and changes nothing.
-2. **`mode: request`** triggers a `ctx.elicit` confirmation when the client supports it; declining cancels before submission.
-3. **`destructiveHint: true`** is the fallback signal for non-interactive clients whose approval flow reads annotations.
+2. **`mode: request`** asks for an explicit confirmation and submits only once it comes back accepted. Declining, cancelling, or answering with anything the confirmation schema rejects cancels before submission (`request_cancelled`) — there is no branch that proceeds without an acceptance, so a client that never answers leaves the write un-run.
+3. **`destructiveHint: true`** surfaces the risk in client-side approval flows.
+
+Over HTTP this needs `MCP_SESSION_MODE` to resolve to `stateful` (the default `auto` does): 2025-era clients answer the confirmation over a live session, which `stateless` has no way to hold open.
 
 - Capability validation (4K enabled? seasons valid? partial requests allowed?) runs **locally** against cached instance settings _before_ any POST, so a bad request fails with an actionable typed error instead of a failed write
 - TV requests take `seasons: "all"` or an explicit list (e.g. `[1, 2]`); Specials are excluded unless the instance enables them
