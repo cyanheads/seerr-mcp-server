@@ -16,6 +16,7 @@
  */
 
 import type { Context } from '@cyanheads/mcp-ts-core';
+import { McpError } from '@cyanheads/mcp-ts-core/errors';
 import type { DomainRequestDetail } from './normalizers.js';
 import type { SeerrService } from './seerr-service.js';
 
@@ -125,11 +126,22 @@ async function fetchTitle(
         : (await seerr.getMovie(tmdbId, ctx, BEST_EFFORT)).title;
     return title?.trim() || undefined;
   } catch (error) {
-    ctx.log.debug('Seerr title lookup failed', {
-      mediaType,
-      tmdbId,
-      error: error instanceof Error ? error.message : String(error),
-    });
+    ctx.log.debug('Seerr title lookup failed', { mediaType, tmdbId, cause: causeOf(error) });
     return;
   }
+}
+
+/**
+ * A classified label for a swallowed lookup failure. `ctx.log` is dual-sink — every
+ * call also reaches the client as `notifications/message` — and a raw upstream or
+ * network message can echo the instance host or a root-folder path, neither of which
+ * passes through the `normalizers.ts` choke point. The classifier's own reason (or
+ * the error's constructor name) carries the diagnostic without the free text.
+ */
+function causeOf(error: unknown): string {
+  if (error instanceof McpError) {
+    const reason = (error.data as { reason?: unknown } | undefined)?.reason;
+    return typeof reason === 'string' ? reason : `McpError(${error.code})`;
+  }
+  return error instanceof Error ? error.name : 'unknown';
 }

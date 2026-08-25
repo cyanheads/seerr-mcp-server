@@ -9,6 +9,8 @@
  * @module tests/services/seerr/titles.test
  */
 
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
+import type { MockContextLogger } from '@cyanheads/mcp-ts-core/testing';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { describe, expect, it, vi } from 'vitest';
 import type { DomainRequestDetail } from '@/services/seerr/normalizers.js';
@@ -17,6 +19,9 @@ import { hydrateRequestTitle, resolveTitles, titleKeyOf } from '@/services/seerr
 
 /** A SeerrService stand-in exposing only the two detail reads hydration uses. */
 const asService = (partial: Partial<SeerrService>) => partial as unknown as SeerrService;
+
+/** `createMockContext` types `log` as the narrow `ContextLogger`; the mock records calls. */
+const loggedCalls = (log: unknown) => (log as MockContextLogger).calls;
 
 const detail = (tmdbId: number | undefined): DomainRequestDetail => ({
   requestId: 47,
@@ -228,5 +233,42 @@ describe('hydrateRequestTitle', () => {
 
     expect(getTv).toHaveBeenCalledWith(1399, ctx, { maxRetries: 0 });
     expect(result.title).toBe('Game of Thrones');
+  });
+});
+
+/**
+ * `ctx.log` is dual-sink as of mcp-ts-core 0.12.0 — every call also emits
+ * `notifications/message` to the client. A raw upstream or network error message can
+ * echo the instance host or a root-folder path, neither of which passes through the
+ * `normalizers.ts` redaction choke point, so the degradation log must carry a
+ * classified reason rather than the message itself.
+ */
+describe('title lookup — the failure log is client-visible', () => {
+  it('logs a classified reason, never the raw upstream error message', async () => {
+    const ctx = createMockContext({ tenantId: 'test' });
+    const getMovie = vi.fn(async () => {
+      throw new Error('request to http://seerr.internal:5055/api/v1/movie/404404 failed');
+    });
+
+    const result = await hydrateRequestTitle(detail(404404), asService({ getMovie }), ctx);
+
+    expect(result.title).toBeUndefined();
+    const logged = JSON.stringify(loggedCalls(ctx.log));
+    expect(logged).not.toContain('seerr.internal');
+    expect(logged).not.toContain('5055');
+    expect(logged).toContain('Error');
+  });
+
+  it('logs the McpError reason when the classifier tagged the failure', async () => {
+    const ctx = createMockContext({ tenantId: 'test' });
+    const getMovie = vi.fn(async () => {
+      throw new McpError(JsonRpcErrorCode.NotFound, 'Unable to retrieve the requested title.', {
+        reason: 'media_not_found',
+      });
+    });
+
+    await hydrateRequestTitle(detail(404404), asService({ getMovie }), ctx);
+
+    expect(JSON.stringify(loggedCalls(ctx.log))).toContain('media_not_found');
   });
 });
