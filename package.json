@@ -1,6 +1,6 @@
 {
   "name": "@cyanheads/seerr-mcp-server",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Search Jellyseerr/Overseerr, check availability, and create guarded media requests via MCP. STDIO or Streamable HTTP.",
   "mcpName": "io.github.cyanheads/seerr-mcp-server",
   "type": "module",

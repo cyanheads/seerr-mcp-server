@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.3](changelog/0.1.x/0.1.3.md) — 2026-08-25 · ⚠️ Breaking · 🛡️ Security
+
+Adopts mcp-ts-core 0.12 (strict tool inputs, @modelcontextprotocol/server); closes the seerr_request_media confirmation bypass for non-elicit clients; fixes a settings-cache key bug and a title-lookup log leak.
+
 ## [0.1.2](changelog/0.1.x/0.1.2.md) — 2026-08-02
 
 Adds opt-in title hydration to seerr_list_requests and unconditional hydration to seerr_request_status/resource; narrows the retry budget for best-effort title lookups; corrects a stale docs/design.md claim about the service's HTTP layer.
