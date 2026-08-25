@@ -41,7 +41,8 @@ import type {
 export type RawMediaRequestDetail = RawMediaRequest;
 
 const SERVICE_NAME = 'Seerr';
-const SETTINGS_CACHE_KEY = 'seerr:settings:public';
+/** `ctx.state` restricts keys to `[a-zA-Z0-9_.\-/]`; a colon-separated key is rejected outright. */
+const SETTINGS_CACHE_KEY = 'seerr/settings/public';
 const SETTINGS_CACHE_TTL_SECONDS = 300;
 
 /**
@@ -283,7 +284,9 @@ export class SeerrService {
       },
       {
         operation: `SeerrService.request ${method} ${path}`,
-        context: { requestId: ctx.requestId, timestamp: ctx.timestamp },
+        // `Context extends RequestContext`, so the handler ctx passes through whole —
+        // a hand-rolled slice would drop traceId, spanId, tenantId, and extra.
+        context: ctx,
         baseDelayMs: options.baseDelayMs ?? 300,
         ...(options.maxRetries !== undefined ? { maxRetries: options.maxRetries } : {}),
         signal: ctx.signal,

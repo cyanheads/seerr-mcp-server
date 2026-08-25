@@ -194,12 +194,44 @@ describe('SeerrService', () => {
   });
 
   it('caches /settings/public — a second call does not re-fetch', async () => {
-    fetchMock.mockResolvedValue(jsonResponse(200, { movie4kEnabled: true, mediaServerType: 2 }));
+    fetchMock.mockImplementation(async () =>
+      jsonResponse(200, { movie4kEnabled: true, mediaServerType: 2 }),
+    );
     const ctx = createMockContext({ tenantId: 'test' });
 
     const first = await getSeerrService().getPublicSettings(ctx);
     const second = await getSeerrService().getPublicSettings(ctx);
     expect(first).toEqual(second);
     expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  /**
+   * `ctx.state` rejects any key outside `[a-zA-Z0-9_.\-/]`, and both cache calls
+   * swallow their own failure — so a non-conforming key degrades to a silent miss on
+   * every call rather than an error. Assert the value actually landed in state, not
+   * merely that a second call skipped the network.
+   */
+  it('writes the settings cache under a storage-legal key', async () => {
+    fetchMock.mockImplementation(async () =>
+      jsonResponse(200, { movie4kEnabled: true, mediaServerType: 2 }),
+    );
+    const ctx = createMockContext({ tenantId: 'test' });
+    await getSeerrService().getPublicSettings(ctx);
+
+    const { items } = await ctx.state.list();
+    expect(items).toHaveLength(1);
+    expect(items[0]!.key).toMatch(/^[a-zA-Z0-9_./-]+$/);
+    await expect(ctx.state.get(items[0]!.key)).resolves.toMatchObject({ movie4kEnabled: true });
+  });
+
+  it('re-fetches /settings/public on forceRefresh', async () => {
+    fetchMock.mockImplementation(async () =>
+      jsonResponse(200, { movie4kEnabled: true, mediaServerType: 2 }),
+    );
+    const ctx = createMockContext({ tenantId: 'test' });
+    await getSeerrService().getPublicSettings(ctx);
+    await getSeerrService().getPublicSettings(ctx, { forceRefresh: true });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });
