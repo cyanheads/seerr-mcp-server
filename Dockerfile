@@ -3,8 +3,11 @@
 #
 # This stage installs all dependencies (including dev), builds the TypeScript
 # source code into JavaScript, and prepares the production assets.
+# The build stage pins to the BUILD platform, never the target: it emits
+# architecture-independent JavaScript, so running it emulated buys nothing and
+# costs a QEMU amd64 compile that Bun exhausts memory on.
 # ==============================================================================
-FROM oven/bun:1.4.0 AS build
+FROM --platform=$BUILDPLATFORM oven/bun:1.4.0 AS build
 
 WORKDIR /usr/src/app
 
