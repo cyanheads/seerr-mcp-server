@@ -163,6 +163,32 @@ describe('SeerrService', () => {
   });
 
   /**
+   * The unclassified-status fallback is the one error path that leaves the service
+   * without passing through `normalizers.ts`, so it is also the one that could put
+   * the instance's host:port on a client-facing surface. `error.data` is forwarded
+   * verbatim as `structuredContent.error.data`, so nothing here may name the base
+   * URL or the API key. A 403 is chosen because it is non-transient — one attempt,
+   * no retry budget spent.
+   */
+  it('puts neither the upstream URL nor the API key on a generic non-OK error', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(403, { message: 'forbidden' }));
+    const ctx = createMockContext({ tenantId: 'test' });
+
+    const error = await getSeerrService()
+      .getStatus(ctx)
+      .then(
+        () => undefined,
+        (err: unknown) => err as Error & { data?: Record<string, unknown> },
+      );
+
+    expect(error).toBeDefined();
+    expect(error?.data).not.toHaveProperty('url');
+    const serialized = `${error?.message} ${JSON.stringify(error?.data ?? {})}`;
+    expect(serialized).not.toContain('seerr.test');
+    expect(serialized).not.toContain('TEST-API-KEY');
+  });
+
+  /**
    * A 503 classifies as transient, so the default budget spends four attempts on
    * it. That is right for a required read and wrong for a best-effort one — the
    * title join passes `maxRetries: 0` precisely to opt out, so the service has to

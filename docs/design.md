@@ -421,7 +421,7 @@ if (ctx.inputs.accepted(CONFIRM_KEY, ConfirmSchema)?.confirmed !== true) {
 }
 // POST proceeds.
 ```
-`mode: preview` default is the blast-radius safe default; `mode: request` plus an accepted confirmation is the explicit, confirmed path. The schema is passed to both the request and the read because the SDK never re-validates the response against the schema its request advertised. There is no "proceed anyway when the round is unavailable" branch — `ctx.requestInput` is present on every transport and both protocol eras, so a client that never answers simply leaves the write un-run. That requires `MCP_SESSION_MODE` to resolve to `stateful` under HTTP: a 2025-era client answers over a live session, which `stateless` has no way to hold open.
+`mode: preview` default is the blast-radius safe default; `mode: request` plus an accepted confirmation is the explicit, confirmed path. The schema is passed to both the request and the read because the SDK never re-validates the response against the schema its request advertised. There is no "proceed anyway when the round is unavailable" branch — `ctx.requestInput` is present on every transport and both protocol eras, so a client that never answers simply leaves the write un-run. That requires the session mode to resolve to `stateful` under HTTP: a 2025-era client answers over a live session, which `stateless` has no way to hold open. `createApp({ sessionMode: { default: 'stateful', require: 'stateful' } })` declares it in `src/index.ts`, so a `stateless` `MCP_SESSION_MODE` fails startup with a `ConfigurationError` rather than leaving the tool quietly unusable.
 
 **Errors (typed contract):**
 ```ts

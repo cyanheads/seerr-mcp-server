@@ -73,6 +73,8 @@ export const seerrRequestResource = resource('seerr://request/{requestId}', {
       code: JsonRpcErrorCode.NotFound,
       when: 'No request exists with the given ID (Seerr returns HTTP 404 "Request not found.").',
       recovery: 'List requests with seerr_list_requests to find a valid requestId, then retry.',
+      /** Raised by the service-layer classifier in `services/seerr/errors.ts`, not by a handler `ctx.fail`. */
+      thrownBy: 'service',
     },
   ],
 

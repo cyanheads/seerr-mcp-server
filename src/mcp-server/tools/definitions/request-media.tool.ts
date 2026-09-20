@@ -190,6 +190,8 @@ export const requestMediaTool = tool('seerr_request_media', {
       when: 'tmdbId does not resolve to a movie/show (Seerr 500 "Unable to retrieve movie.").',
       recovery:
         'Run seerr_search_media to get the correct tmdbId and retry with the matching mediaType.',
+      /** Raised by the service-layer classifier in `services/seerr/errors.ts`, not by a handler `ctx.fail`. */
+      thrownBy: 'service',
     },
     {
       reason: 'seasons_required',

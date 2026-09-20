@@ -115,6 +115,8 @@ export const getMediaTool = tool('seerr_get_media', {
       when: 'The TMDB ID does not resolve to a movie/show (Seerr returns HTTP 500 "Unable to retrieve movie.").',
       recovery:
         'Call seerr_search_media to find the correct tmdbId, then retry with the exact ID and matching mediaType.',
+      /** Raised by the service-layer classifier in `services/seerr/errors.ts`, not by a handler `ctx.fail`. */
+      thrownBy: 'service',
     },
   ],
 
