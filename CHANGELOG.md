@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.4](changelog/0.1.x/0.1.4.md) — 2026-09-20 · ⚠️ Breaking
+
+Adopts mcp-ts-core 0.13.6: the HTTP session posture is declared in src/ so a stateless deployment fails startup instead of serving an unusable guarded write, argument rejections reach callers as InvalidParams with a recovery hint, and the framework skill tree moves to framework-skills/.
+
 ## [0.1.3](changelog/0.1.x/0.1.3.md) — 2026-08-25 · ⚠️ Breaking · 🛡️ Security
 
 Adopts mcp-ts-core 0.12 (strict tool inputs, @modelcontextprotocol/server); closes the seerr_request_media confirmation bypass for non-elicit clients; fixes a settings-cache key bug and a title-lookup log leak.
