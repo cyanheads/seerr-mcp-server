@@ -6,8 +6,6 @@ Open one from the **Issues** tab and pick the **Bug Report** or **Feature Reques
 
 Direct links: [Bug Report](https://github.com/cyanheads/seerr-mcp-server/issues/new?template=bug_report.yml) · [Feature Request](https://github.com/cyanheads/seerr-mcp-server/issues/new?template=feature_request.yml)
 
-Pull requests are welcome too. Open an issue first for anything larger than a typo, and run `bun run devcheck` and `bun run test` before submitting.
-
 ## Server bug or framework bug?
 
 `seerr-mcp-server` is built on [@cyanheads/mcp-ts-core](https://github.com/cyanheads/mcp-ts-core), which handles transports, auth, config, logging, and telemetry. Sorting out which layer broke saves everyone a round-trip:
@@ -38,8 +36,8 @@ Do the triage first — an unverified report costs more to read than it saves to
 
 Two workflows ship with this project:
 
-- [`skills/report-issue-local/SKILL.md`](../skills/report-issue-local/SKILL.md) — filing against this repo.
-- [`skills/report-issue-framework/SKILL.md`](../skills/report-issue-framework/SKILL.md) — filing against `mcp-ts-core` when you've isolated the bug to the framework.
+- [`framework-skills/report-issue-local/SKILL.md`](../framework-skills/report-issue-local/SKILL.md) — filing against this repo.
+- [`framework-skills/report-issue-framework/SKILL.md`](../framework-skills/report-issue-framework/SKILL.md) — filing against `mcp-ts-core` when you've isolated the bug to the framework.
 
 Read the relevant one before filing on a user's behalf.
 

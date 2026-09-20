@@ -3,9 +3,8 @@
     "command": "npx",
     "args": ["-y", "@cyanheads/seerr-mcp-server"],
     "env": {
-      "MCP_TRANSPORT_TYPE": "stdio",
-      "SEERR_BASE_URL": "",
-      "SEERR_API_KEY": ""
-    }
+      "MCP_TRANSPORT_TYPE": "stdio"
+    },
+    "env_vars": ["SEERR_BASE_URL", "SEERR_API_KEY"]
   }
 }

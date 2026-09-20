@@ -1,21 +1,40 @@
 {
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "seerr-mcp-server",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Search Jellyseerr/Overseerr, check availability, and create guarded media requests.",
   "author": {
-    "name": "cyanheads"
+    "name": "cyanheads",
+    "email": "casey@caseyjhand.com",
+    "url": "https://github.com/cyanheads"
   },
   "homepage": "https://github.com/cyanheads/seerr-mcp-server#readme",
   "repository": "https://github.com/cyanheads/seerr-mcp-server",
   "license": "Apache-2.0",
+  "keywords": ["mcp", "mcp-server", "model-context-protocol", "jellyseerr", "overseerr", "radarr", "sonarr"],
+  "userConfig": {
+    "seerr_base_url": {
+      "type": "string",
+      "title": "Seerr base URL",
+      "description": "Required. Base URL of the Jellyseerr/Overseerr instance, e.g. http://localhost:5055. No /api/v1 suffix, no trailing slash.",
+      "required": true
+    },
+    "seerr_api_key": {
+      "type": "string",
+      "title": "Seerr API key",
+      "description": "Required. Jellyseerr API key (Settings → General → API Key), sent as the X-Api-Key header.",
+      "sensitive": true,
+      "required": true
+    }
+  },
   "mcpServers": {
     "seerr-mcp-server": {
       "command": "npx",
       "args": ["-y", "@cyanheads/seerr-mcp-server"],
       "env": {
         "MCP_TRANSPORT_TYPE": "stdio",
-        "SEERR_BASE_URL": "",
-        "SEERR_API_KEY": ""
+        "SEERR_BASE_URL": "${user_config.seerr_base_url}",
+        "SEERR_API_KEY": "${user_config.seerr_api_key}"
       }
     }
   }
