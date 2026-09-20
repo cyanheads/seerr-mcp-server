@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.1.3-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.0.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/seerr-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/seerr-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.0-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.1.4-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.0.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/seerr-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/seerr-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.0-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -21,16 +21,11 @@
 
 ---
 
-A workflow MCP server over a self-hosted [Jellyseerr](https://github.com/Fallenbagel/jellyseerr) / [Overseerr](https://overseerr.dev/) instance — the request layer that fronts Jellyfin/Plex/Emby plus Radarr and Sonarr. The unit of work is not "download a movie"; it is **search → resolve the exact TMDB-backed title → check availability and request state → create a guarded request that Radarr/Sonarr act on.** Jellyseerr owns permissions, quotas, routing, and status; this server never touches Radarr/Sonarr directly.
+## Overview
 
-Two properties make it safe to hand an agent:
+Jellyseerr and Overseerr media-request workflow: search TMDB-backed titles, confirm the exact match, check availability and request state, and create a guarded request that Radarr/Sonarr act on. Jellyseerr owns permissions, quotas, routing, and status — this server never calls Radarr/Sonarr directly. Runs as a stdio process or a local Streamable HTTP server.
 
-- **Guarded writes.** The one mutating tool (`seerr_request_media`) defaults to `mode: preview` — it resolves the title and returns the exact payload that _would_ be submitted without writing anything. The real request fires only on `mode: request`, which asks for an explicit confirmation and submits only once that confirmation comes back accepted.
-- **Operator-safe output.** Every payload passes through one normalization layer ([`src/services/seerr/normalizers.ts`](./src/services/seerr/normalizers.ts)) that allow-lists the fields it emits, so operator email, Plex/Jellyfin tokens and media-server IDs, and internal `serviceUrl` hosts never reach the model — requesters are projected to `{ id, displayName }`. Redaction is always on; filesystem paths are the single opt-in, behind `includePaths`.
-
-## Tools
-
-Six tools covering the request workflow — discover (`search`) → confirm (`get`) → understand routing (`service_options`) → request (`request_media`) → track (`request_status` / `list_requests`):
+### Tools
 
 | Tool | Description |
 |:---|:---|
@@ -41,89 +36,89 @@ Six tools covering the request workflow — discover (`search`) → confirm (`ge
 | `seerr_request_status` | Fetch one request by ID — title, decoded request + media availability (incl. 4K), requester, routing summary, and a state-tuned next-step hint. |
 | `seerr_service_options` | Summarize configured Radarr/Sonarr services, default quality profiles, and instance capability flags (4K, partial requests, specials, media server). Filesystem paths redacted unless `includePaths`. |
 
-Every status field is decoded to `{ raw, label }` — both the numeric code Jellyseerr returns and a human label — so an agent never has to hardcode the enum mapping.
+### Resources
 
-### `seerr_search_media`
+| Resource | Description |
+|:---|:---|
+| `seerr://request/{requestId}` | Read-once summary of one request — decoded status, media availability, requester, and routing. Mirrors `seerr_request_status`. |
 
-Title disambiguation entry point. Wraps `GET /search`, filters to movies and TV (people are always excluded), and decodes availability when the title is tracked.
+All request data is also reachable via tools — request enumeration is the job of `seerr_list_requests` (the tool-only access path).
 
-- Free-text title queries matched against TMDB; `movie` / `tv` / `all` media-type filter
-- Decoded availability (`status`, plus `status4k` when 4K is enabled) for tracked titles only
-- Pagination by page, with a per-call result `limit` to cap output size
-- Optional ISO 639-1 `language` for localized titles/overviews
+## Capability reference
+
+### `seerr_search_media` <sub>tool</sub>
+
+- Free-text title query matched against TMDB; `mediaType` filters to `movie` / `tv` / `all` (people always excluded)
+- Decoded availability (`status`, plus `status4k` when 4K is enabled) only for titles Jellyseerr already tracks
+- `page` pagination (1–1000); `limit` caps returned results per call (1–20, default 10)
+- Optional ISO 639-1 `language` override for localized titles/overviews
 - Empty results are a normal success — returns `[]` with a guidance notice, not an error
 
 ---
 
-### `seerr_get_media`
-
-Confirm the exact title before a write. Wraps `GET /movie/{id}` or `GET /tv/{id}`, optionally a season's episodes.
+### `seerr_get_media` <sub>tool</sub>
 
 - Availability plus any existing open request for the title (avoids duplicate requests)
 - TV: omit `seasonNumber` for a per-season summary, or pass one to fetch that season's episode list (season 0 is Specials)
-- A TMDB ID that doesn't resolve surfaces as a clean `media_not_found` with a search-recovery hint (Jellyseerr's raw HTTP 500 is classified in the service layer)
+- A TMDB ID that doesn't resolve surfaces as a typed `media_not_found` with a search-recovery hint (Jellyseerr's raw HTTP 500 is classified in the service layer)
 
 ---
 
-### `seerr_list_requests`
-
-Review recent requests and their lifecycle. Wraps `GET /request`.
+### `seerr_list_requests` <sub>tool</sub>
 
 - Lifecycle `filter` (pending, processing, available, failed, …), `mediaType`, and `requestedById` filters
 - Sort by created (`added`) or last-changed (`modified`), ascending or descending
-- `take` / `skip` pagination; the enrichment trailer echoes the filter set the server applied
+- `take` (1–100, default 20) / `skip` pagination; the enrichment trailer echoes the applied filter set
 - Requester is PII-redacted to `{ id, displayName }`
-- Titles aren't on request objects. `includeTitles: true` joins them from the media records — one lookup per _distinct_ title on the page, so a 4K and a non-4K request for one film cost one call. Default is off, keeping the call to a single upstream read. Rows that can't be resolved keep every other field and are disclosed in the notice
+- Titles aren't on request objects — `includeTitles: true` joins them from media records (one lookup per distinct title, default off); unresolved rows keep every other field and are disclosed in the notice
 
 ---
 
-### `seerr_request_media`
+### `seerr_request_media` <sub>tool</sub>
 
-The only mutation in the surface, and it is triple-guarded:
-
-1. **`mode: preview` (default)** resolves the title and returns the exact `POST /request` payload that _would_ be submitted — no write. A sloppy call shows the payload and changes nothing.
-2. **`mode: request`** asks for an explicit confirmation and submits only once it comes back accepted. Declining, cancelling, or answering with anything the confirmation schema rejects cancels before submission (`request_cancelled`) — there is no branch that proceeds without an acceptance, so a client that never answers leaves the write un-run.
-3. **`destructiveHint: true`** surfaces the risk in client-side approval flows.
-
-Over HTTP this needs `MCP_SESSION_MODE` to resolve to `stateful` (the default `auto` does): 2025-era clients answer the confirmation over a live session, which `stateless` has no way to hold open.
-
-- Capability validation (4K enabled? seasons valid? partial requests allowed?) runs **locally** against cached instance settings _before_ any POST, so a bad request fails with an actionable typed error instead of a failed write
-- TV requests take `seasons: "all"` or an explicit list (e.g. `[1, 2]`); Specials are excluded unless the instance enables them
-- Optional routing overrides (`serverId`, `profileId`, `rootFolder`, `languageProfileId`) — omit to use Jellyseerr's defaults (recommended)
-- An existing request for the title is surfaced in the output; a duplicate rejection from Jellyseerr maps to a typed `duplicate_request` pointing back at it
+- **Guarded write.** `mode: preview` (default) resolves the title and returns the exact `POST /request` payload that would be submitted, with no write; `mode: request` submits only after an explicit confirmation round comes back accepted — declining, cancelling, or an invalid answer cancels before submission (`request_cancelled`), and `destructiveHint: true` flags the risk to client approval flows
+- Runs `stateful` by design — a 2025-era client answers the confirmation over a live session, which `stateless` can't hold open. The server declares that posture itself, so an HTTP deployment that sets `MCP_SESSION_MODE=stateless` fails at startup rather than serving an unusable tool
+- Capability validation (4K enabled? seasons valid? partial requests allowed?) runs locally against cached instance settings before any POST, so a bad request fails with a typed error instead of a failed write
+- TV requests take `seasons: "all"` or an explicit list (e.g. `[1, 2]`); season 0 (Specials) is rejected unless the instance enables it
+- Optional routing overrides — `serverId`, `profileId`, `rootFolder`, `languageProfileId` — omit to use Jellyseerr's defaults (recommended)
+- An existing request for the title surfaces in the output; a duplicate rejection from Jellyseerr maps to a typed `duplicate_request` pointing back at it
 
 ---
 
-### `seerr_service_options`
+### `seerr_request_status` <sub>tool</sub>
 
-Lets an agent reason about request capability and routing without a separate status tool. Fans out service + settings + version reads with `Promise.allSettled`, so one failed leg degrades to a disclosed notice rather than failing the call.
+- Wraps `GET /request/{id}`; `requestId` comes from `seerr_request_media`'s `created.requestId` or `seerr_list_requests`
+- Returns decoded `requestStatus` and `mediaStatus`/`mediaStatus4k`, requester (`{ id, displayName }`), and a routing summary (`serverId`, `profileName`, `is4k` — no filesystem paths)
+- `title` is joined from the media detail endpoint on every call (no opt-in flag needed) and omitted when the request has no `tmdbId` or the lookup fails
+- `stateGuidance` returns a next-step hint tuned to the current status
+- A missing request ID surfaces as a typed `request_not_found` (Jellyseerr's raw HTTP 404 is classified in the service layer)
+
+---
+
+### `seerr_service_options` <sub>tool</sub>
 
 - Instance capability summary: Jellyseerr version, media server, and the `movie4kEnabled` / `series4kEnabled` / `partialRequestsEnabled` / `specialEpisodesEnabled` flags
 - Per-service routing: server ID, default-server flag, 4K capability, and the active + available quality profiles (IDs and names, safe to surface)
 - Filesystem root-folder paths and free space are operator-private — omitted unless `includePaths: true`
+- One failed service leg (Radarr/Sonarr detail, settings, or version) degrades to a disclosed notice instead of failing the whole call
 
-## Resource and prompt
+---
 
-| Type | Name | Description |
-|:---|:---|:---|
-| Resource | `seerr://request/{requestId}` | Read-once summary of one request — title, decoded status + media availability + routing. Mirrors `seerr_request_status`. |
+### `seerr://request/{requestId}` <sub>resource</sub>
 
-All request data is also reachable via tools — request _enumeration_ is the job of `seerr_list_requests` (filterable, the tool-only access path), so the collection is intentionally not exposed as a resource. There are no prompts; the guarded-write workflow lives in the tool, not a prompt template.
+- Mirrors `seerr_request_status` — same `projectRequestDetail` redaction choke point and title join, so the output is identical and equally PII-clean
+- `requestId` comes from `seerr_request_media` or `seerr_list_requests`
+- No per-read options — title is always joined (one request, one extra read); absent when there's no `tmdbId` or the lookup fails
+- A missing request ID surfaces as a typed `request_not_found`
 
 ## Features
 
-Built on [`@cyanheads/mcp-ts-core`](https://www.npmjs.com/package/@cyanheads/mcp-ts-core):
+Built on [`@cyanheads/mcp-ts-core`](https://github.com/cyanheads/mcp-ts-core): stdio and Streamable HTTP transports, pluggable auth (`none` / `jwt` / `oauth`), swappable storage (`in-memory`, `filesystem`, `Supabase`, `Cloudflare KV/R2/D1`), structured logging with optional OpenTelemetry tracing.
 
-- Declarative tool and resource definitions — single file per primitive, framework handles registration and validation
-- Unified error handling — handlers throw, framework catches, classifies, and formats
-- Pluggable auth: `none`, `jwt`, `oauth`
-- Swappable storage backends: `in-memory`, `filesystem`, `Supabase`, `Cloudflare KV/R2/D1`
-- Structured logging with optional OpenTelemetry tracing
-- STDIO and Streamable HTTP transports
-
-Jellyseerr-specific:
+Seerr-specific:
 
 - Read + guarded-request only — admin-scope endpoints (approve/decline, retry, edit/delete, media/file deletion, user/settings/sync) are excluded by design, not by API limitation
+- PII/infra redaction centralized in one normalizer choke point — requesters project to `{ id, displayName }`; operator email, Plex/Jellyfin tokens, and `serviceUrl` never reach output; filesystem paths are opt-in via `includePaths`
 - Status decoding centralized in one helper — request and media statuses (including the separate 4K availability) decode to `{ raw, label }` everywhere, forward-compatible with new Jellyseerr status codes
 - Capability validation against cached instance settings catches most bad requests before they reach the API
 - A short-TTL settings cache avoids a round-trip on every preview
@@ -135,7 +130,7 @@ Agent-friendly output:
 
 ## Getting started
 
-This server connects to your own Jellyseerr/Overseerr instance — there is no public hosted endpoint. Add the following to your MCP client configuration file, pointing `SEERR_BASE_URL` at your instance and supplying its API key.
+Add the following to your MCP client configuration file, pointing `SEERR_BASE_URL` at your own Jellyseerr or Overseerr instance and supplying its API key.
 
 ```json
 {
@@ -184,7 +179,7 @@ MCP_TRANSPORT_TYPE=http MCP_HTTP_PORT=3010 SEERR_BASE_URL=http://localhost:5055 
 
 ### Prerequisites
 
-- [Bun v1.3.2](https://bun.sh/) or higher (or Node.js v24+).
+- [Bun v1.4.0](https://bun.sh/) or higher (or Node.js v24+).
 - A running Jellyseerr or Overseerr instance, and its API key (Settings → General → API Key).
 
 ### Installation
@@ -292,7 +287,7 @@ See [`CLAUDE.md`/`AGENTS.md`](./CLAUDE.md) for development guidelines and archit
 
 ## Contributing
 
-Issues and pull requests are welcome. Run checks and tests before submitting:
+Issues are welcome. Run checks and tests before submitting:
 
 ```sh
 bun run devcheck
