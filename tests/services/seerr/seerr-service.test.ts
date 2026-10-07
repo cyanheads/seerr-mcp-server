@@ -162,6 +162,34 @@ describe('SeerrService', () => {
     await expect(getSeerrService().getStatus(ctx)).rejects.toBeDefined();
   });
 
+  it.each(['503', 'network', 'invalid-json'])(
+    'does not retry a non-idempotent request POST after %s failure',
+    async (failure) => {
+      vi.useFakeTimers();
+      try {
+        fetchMock.mockImplementation(async () => {
+          if (failure === 'network') throw new TypeError('fetch failed');
+          if (failure === 'invalid-json') return new Response('{', { status: 200 });
+          return jsonResponse(503, { message: 'temporarily down' });
+        });
+        const ctx = createMockContext({ tenantId: 'test' });
+        const outcome = getSeerrService()
+          .createRequest({ mediaType: 'movie', mediaId: 1275779, is4k: false }, ctx)
+          .then(
+            () => undefined,
+            (error: unknown) => error,
+          );
+        await vi.runAllTimersAsync();
+
+        expect(await outcome).toBeDefined();
+        expect(fetchMock).toHaveBeenCalledOnce();
+        expect(fetchMock.mock.calls[0]![1]?.method).toBe('POST');
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
   /**
    * The unclassified-status fallback is the one error path that leaves the service
    * without passing through `normalizers.ts`, so it is also the one that could put

@@ -1,8 +1,9 @@
 /**
  * @fileoverview SeerrService — the typed client for the Seerr REST API v1
  * (`{SEERR_BASE_URL}/api/v1`, `X-Api-Key` auth). One upstream API, one service,
- * init/accessor pattern. Every method wraps a single-attempt fetch + parse in
- * `withRetry` (the retry boundary covers the full pipeline). Not-found-bearing GETs
+ * init/accessor pattern. Reads wrap fetch + parse in `withRetry` (the retry
+ * boundary covers the full pipeline); request creation makes one attempt because
+ * Seerr provides no idempotency key. Not-found-bearing GETs
  * (movie/tv/request) route their non-OK responses through the `errors.ts` classifier
  * so Seerr's idiosyncratic 500/404 not-found bodies become clean domain errors.
  *
@@ -184,9 +185,13 @@ export class SeerrService {
     });
   }
 
-  /** `POST /request` — create a media request. The only write in the surface. */
+  /** `POST /request` — one attempt; a failed response may still have created the request. */
   createRequest(body: CreateRequestBody, ctx: Context): Promise<RawMediaRequestDetail> {
-    return this.request<RawMediaRequestDetail>('/request', ctx, { method: 'POST', body });
+    return this.request<RawMediaRequestDetail>('/request', ctx, {
+      method: 'POST',
+      body,
+      maxRetries: 0,
+    });
   }
 
   /* ------------------------------------------------------------------ *
