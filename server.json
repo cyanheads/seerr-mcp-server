@@ -12,18 +12,8 @@
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/seerr-mcp-server",
-      "runtimeHint": "bun",
+      "runtimeHint": "npx",
       "version": "0.1.4",
-      "packageArguments": [
-        {
-          "type": "positional",
-          "value": "run"
-        },
-        {
-          "type": "positional",
-          "value": "start:stdio"
-        }
-      ],
       "environmentVariables": [
         {
           "name": "SEERR_BASE_URL",
@@ -60,19 +50,15 @@
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/seerr-mcp-server",
-      "runtimeHint": "bun",
+      "runtimeHint": "npx",
       "version": "0.1.4",
-      "packageArguments": [
-        {
-          "type": "positional",
-          "value": "run"
-        },
-        {
-          "type": "positional",
-          "value": "start:http"
-        }
-      ],
       "environmentVariables": [
+        {
+          "name": "MCP_TRANSPORT_TYPE",
+          "description": "Selects the HTTP transport.",
+          "format": "string",
+          "value": "http"
+        },
         {
           "name": "SEERR_BASE_URL",
           "description": "Base URL of the Jellyseerr/Overseerr instance, e.g. http://host:5055. No /api/v1 suffix, no trailing slash.",
