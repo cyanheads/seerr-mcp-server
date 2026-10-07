@@ -10,7 +10,11 @@
  */
 
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext, expectInputRequired } from '@cyanheads/mcp-ts-core/testing';
+import {
+  createMockContext,
+  expectInputRequired,
+  runToolContract,
+} from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { RawMediaRequestDetail } from '@/services/seerr/seerr-service.js';
 import type { RawMovieDetail, RawPublicSettings, RawTvDetail } from '@/services/seerr/types.js';
@@ -54,12 +58,21 @@ const requestMovieInput = () =>
   requestMediaTool.input.parse({ mediaType: 'movie', tmdbId: 1275779, mode: 'request' });
 
 /** Seeds the second round with whatever the client sent back for the confirmation key. */
-const roundTwo = (response: unknown) =>
-  createMockContext({
+const roundTwo = async (response: unknown) => {
+  const first = createMockContext({ tenantId: 'test', errors: requestMediaTool.errors });
+  const asked = await expectInputRequired(() =>
+    requestMediaTool.handler(requestMovieInput(), first),
+  );
+  const ctx = createMockContext({
     tenantId: 'test',
     errors: requestMediaTool.errors,
     inputResponses: { confirm: response },
+    requestState: asked.requestState,
   });
+  const record = await first.state.get(`consent/${asked.requestState}`);
+  if (record) await ctx.state.set(`consent/${asked.requestState}`, record, { ttl: 600 });
+  return ctx;
+};
 
 describe('seerr_request_media — preview (default, no write)', () => {
   beforeEach(() => {
@@ -121,7 +134,7 @@ describe('seerr_request_media — request (guarded write)', () => {
   });
 
   it('writes ONLY once re-entered with a schema-valid acceptance', async () => {
-    const ctx = roundTwo({ action: 'accept', content: { confirmed: true } });
+    const ctx = await roundTwo({ action: 'accept', content: { confirmed: true } });
     const result = await requestMediaTool.handler(requestMovieInput(), ctx);
 
     expect(service.createRequest).toHaveBeenCalledOnce();
@@ -132,8 +145,128 @@ describe('seerr_request_media — request (guarded write)', () => {
     });
   });
 
+  it('asks again for a pre-answered acceptance without a server record', async () => {
+    const ctx = createMockContext({
+      tenantId: 'test',
+      errors: requestMediaTool.errors,
+      inputResponses: { confirm: { action: 'accept', content: { confirmed: true } } },
+    });
+    await expectInputRequired(() => requestMediaTool.handler(requestMovieInput(), ctx));
+    expect(service.createRequest).not.toHaveBeenCalled();
+  });
+
+  it.each([{ tmdbId: 42 }, { is4k: true }, { rootFolder: '/changed' }, { profileId: 2 }])(
+    'asks again when the confirmed target or payload changes: %j',
+    async (change) => {
+      const ctx = await roundTwo({ action: 'accept', content: { confirmed: true } });
+      await expectInputRequired(() =>
+        requestMediaTool.handler({ ...requestMovieInput(), ...change }, ctx),
+      );
+      expect(service.createRequest).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['operation', 'clientId', 'subject', 'contentHash'])(
+    'asks again for a mismatched %s',
+    async (field) => {
+      const ctx = await roundTwo({ action: 'accept', content: { confirmed: true } });
+      const key = `consent/${ctx.inputs.state()}`;
+      const record = await ctx.state.get(key);
+      await ctx.state.set(key, { ...(record as object), [field]: 'changed' });
+      await expectInputRequired(() => requestMediaTool.handler(requestMovieInput(), ctx));
+      expect(service.createRequest).not.toHaveBeenCalled();
+    },
+  );
+
+  it('spends the record before a sequential replay', async () => {
+    const ctx = await roundTwo({ action: 'accept', content: { confirmed: true } });
+    await requestMediaTool.handler(requestMovieInput(), ctx);
+    await expectInputRequired(() => requestMediaTool.handler(requestMovieInput(), ctx));
+    expect(service.createRequest).toHaveBeenCalledOnce();
+  });
+
+  it('asks again for a different authenticated caller', async () => {
+    const original = await roundTwo({ action: 'accept', content: { confirmed: true } });
+    const ctx = createMockContext({
+      tenantId: 'test',
+      errors: requestMediaTool.errors,
+      requestState: original.inputs.state(),
+      inputResponses: { confirm: { action: 'accept', content: { confirmed: true } } },
+      auth: { clientId: 'other-client', sub: 'other-user', scopes: [] },
+    });
+    const key = `consent/${original.inputs.state()}`;
+    await ctx.state.set(key, await original.state.get(key));
+    await expectInputRequired(() => requestMediaTool.handler(requestMovieInput(), ctx));
+    expect(service.createRequest).not.toHaveBeenCalled();
+  });
+
+  it('asks again when resolved content changes after confirmation', async () => {
+    const ctx = await roundTwo({ action: 'accept', content: { confirmed: true } });
+    service.getMovie.mockResolvedValue({ ...movie, title: 'Changed title' });
+    await expectInputRequired(() => requestMediaTool.handler(requestMovieInput(), ctx));
+    expect(service.createRequest).not.toHaveBeenCalled();
+  });
+
+  it('asks again after the consent record expires', async () => {
+    vi.useFakeTimers();
+    try {
+      const ctx = await roundTwo({ action: 'accept', content: { confirmed: true } });
+      vi.setSystemTime(Date.now() + 601_000);
+      await expectInputRequired(() => requestMediaTool.handler(requestMovieInput(), ctx));
+      expect(service.createRequest).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('exposes an accepted round on both production-shaped result surfaces', async () => {
+    const ctx = await roundTwo({ action: 'accept', content: { confirmed: true } });
+    const result = await runToolContract(
+      {
+        ...requestMediaTool,
+        handler: (input) => requestMediaTool.handler(requestMediaTool.input.parse(input), ctx),
+      },
+      requestMovieInput(),
+    );
+    expect(result.structuredContent).toMatchObject({ created: { requestId: 501 } });
+    expect(JSON.stringify(result.content)).toContain('Created request #501');
+  });
+
+  it('carries cancellation reason and recovery through the contract envelope', async () => {
+    const ctx = await roundTwo({ action: 'cancel' });
+    const result = await runToolContract(
+      {
+        ...requestMediaTool,
+        handler: (input) => requestMediaTool.handler(requestMediaTool.input.parse(input), ctx),
+      },
+      requestMovieInput(),
+    );
+    expect(result.isError).toBe(true);
+    expect(JSON.stringify(result)).toContain('request_cancelled');
+    expect(JSON.stringify(result.content)).toContain('mode:request');
+    expect(service.createRequest).not.toHaveBeenCalled();
+  });
+
+  it('allows only one simultaneous redemption in this process', async () => {
+    const ctx = await roundTwo({ action: 'accept', content: { confirmed: true } });
+    const get = ctx.state.get.bind(ctx.state);
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    vi.spyOn(ctx.state, 'get').mockImplementation(async (...args) => {
+      await held;
+      return get(...args);
+    });
+    const first = requestMediaTool.handler(requestMovieInput(), ctx);
+    await expectInputRequired(() => requestMediaTool.handler(requestMovieInput(), ctx));
+    release();
+    await first;
+    expect(service.createRequest).toHaveBeenCalledOnce();
+  });
+
   it('renders the created request through format() as well as structuredContent', async () => {
-    const ctx = roundTwo({ action: 'accept', content: { confirmed: true } });
+    const ctx = await roundTwo({ action: 'accept', content: { confirmed: true } });
     const result = await requestMediaTool.handler(requestMovieInput(), ctx);
 
     // Claude Code reads structuredContent; Claude Desktop reads content[]. Both carry it.
@@ -145,7 +278,7 @@ describe('seerr_request_media — request (guarded write)', () => {
   });
 
   it('does NOT write when the confirmation is declined (request_cancelled)', async () => {
-    const ctx = roundTwo({ action: 'decline' });
+    const ctx = await roundTwo({ action: 'decline' });
     await expect(requestMediaTool.handler(requestMovieInput(), ctx)).rejects.toMatchObject({
       code: JsonRpcErrorCode.InvalidParams,
       data: {
@@ -157,7 +290,7 @@ describe('seerr_request_media — request (guarded write)', () => {
   });
 
   it('does NOT write when the confirmation is cancelled (request_cancelled)', async () => {
-    const ctx = roundTwo({ action: 'cancel' });
+    const ctx = await roundTwo({ action: 'cancel' });
     await expect(requestMediaTool.handler(requestMovieInput(), ctx)).rejects.toMatchObject({
       data: { reason: 'request_cancelled' },
     });
@@ -169,7 +302,7 @@ describe('seerr_request_media — request (guarded write)', () => {
    * so an "accepted" round carrying something else is untrusted input, not consent.
    */
   it('does NOT write on an accepted round whose content fails the confirmation schema', async () => {
-    const ctx = roundTwo({ action: 'accept', content: { confirmed: 'yes please' } });
+    const ctx = await roundTwo({ action: 'accept', content: { confirmed: 'yes please' } });
     await expect(requestMediaTool.handler(requestMovieInput(), ctx)).rejects.toMatchObject({
       data: { reason: 'request_cancelled' },
     });
@@ -177,7 +310,7 @@ describe('seerr_request_media — request (guarded write)', () => {
   });
 
   it('does NOT write on an accepted round that explicitly withholds consent', async () => {
-    const ctx = roundTwo({ action: 'accept', content: { confirmed: false } });
+    const ctx = await roundTwo({ action: 'accept', content: { confirmed: false } });
     await expect(requestMediaTool.handler(requestMovieInput(), ctx)).rejects.toMatchObject({
       data: { reason: 'request_cancelled' },
     });
@@ -367,7 +500,7 @@ describe('seerr_request_media — duplicate detection', () => {
     service.createRequest.mockRejectedValue(
       new McpError(JsonRpcErrorCode.InvalidParams, 'Request already exists', { httpStatus: 409 }),
     );
-    const ctx = roundTwo({ action: 'accept', content: { confirmed: true } });
+    const ctx = await roundTwo({ action: 'accept', content: { confirmed: true } });
     await expect(requestMediaTool.handler(requestMovieInput(), ctx)).rejects.toMatchObject({
       data: { reason: 'duplicate_request', existingRequestId: 45 },
     });

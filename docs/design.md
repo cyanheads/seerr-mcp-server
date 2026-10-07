@@ -394,34 +394,15 @@ z.object({
 | 2 | `GET /movie/{id}` or `/tv/{id}` | Resolve title/year, read `mediaInfo` for existing requests | always |
 | 3 | Build `payload`, validate (4K allowed? seasons valid? partial allowed?) | Local validation → typed errors before any write | always |
 | 4 | `ctx.requestInput` confirmation round | Human confirms the resolved title + payload before the POST; the handler suspends and is re-entered with the answer | `request` only |
-| 5 | `POST /request` | Create the request | `request` only |
+| 5 | `POST /request` | Create the request in one attempt, without automatic retries | `request` only |
 | 6 | Decode response, project, return `created` | Post-write state for chaining | `request` only |
 
 Settings (step 1) cached in `ctx.state` with a short TTL (instance config rarely changes) to avoid a round-trip on every preview.
 
 **Confirmation round (guarded write):**
-```ts
-annotations: { destructiveHint: true, openWorldHint: true, idempotentHint: false },
-// ...
-// First pass through the request arm carries no response — suspend and ask.
-if (ctx.inputs.view(CONFIRM_KEY).kind === 'missing') {
-  return ctx.requestInput({
-    inputRequests: {
-      [CONFIRM_KEY]: inputRequired.elicit({
-        message: `Create a Seerr request for "${resolved.title}"${input.is4k ? ' (4K)' : ''}` +
-          `${seasonSummary}? This adds it to your Radarr/Sonarr download queue.`,
-        requestedSchema: ConfirmSchema,
-      }),
-    },
-  });
-}
-// Re-entered. Anything that is not a schema-valid acceptance is terminal, never a re-ask.
-if (ctx.inputs.accepted(CONFIRM_KEY, ConfirmSchema)?.confirmed !== true) {
-  throw ctx.fail('request_cancelled', 'Request cancelled before submission.');
-}
-// POST proceeds.
-```
-`mode: preview` default is the blast-radius safe default; `mode: request` plus an accepted confirmation is the explicit, confirmed path. The schema is passed to both the request and the read because the SDK never re-validates the response against the schema its request advertised. There is no "proceed anyway when the round is unavailable" branch — `ctx.requestInput` is present on every transport and both protocol eras, so a client that never answers simply leaves the write un-run. That requires the session mode to resolve to `stateful` under HTTP: a 2025-era client answers over a live session, which `stateless` has no way to hold open. `createApp({ sessionMode: { default: 'stateful', require: 'stateful' } })` declares it in `src/index.ts`, so a `stateless` `MCP_SESSION_MODE` fails startup with a `ConfigurationError` rather than leaving the tool quietly unusable.
+
+The handler in `src/mcp-server/tools/definitions/request-media.tool.ts` redeems a server-held consent record before resolving the current title and payload. Only a record matching the operation, authenticated client and subject, target and payload hash makes an accepted answer valid. Unknown, expired, mismatched or spent records ask again with a fresh record; a matching record with a declined or malformed answer returns `request_cancelled`.
+`mode: preview` default is the blast-radius safe default; `mode: request` plus an accepted confirmation is the explicit, confirmed path. The schema is passed to both the request and the read because the SDK never re-validates the response against the schema its request advertised. There is no "proceed anyway when the round is unavailable" branch — `ctx.requestInput` is present on every transport and both protocol eras, so a client that never answers simply leaves the write un-run. That requires the session mode to resolve to `stateful` under HTTP: a 2025-era client answers over a live session, which `stateless` has no way to hold open. `createApp({ sessionMode: { require: 'stateful' } })` declares it in `src/index.ts`, so a `stateless` `MCP_SESSION_MODE` fails startup with a `ConfigurationError` rather than leaving the tool quietly unusable.
 
 **Errors (typed contract):**
 ```ts
@@ -788,3 +769,5 @@ Live probe of `/service/sonarr/0` returned `languageProfiles: null`. Added to sp
 - `profiles` is an array on `/service/radarr/0` — confirmed live.
 - Settings cache pattern for capability validation — sound.
 - `auth: 'none'` at framework level, local-only stdio — correct for this use case.
+
+Consent records bind the operation, authenticated client and subject, target, and exact resolved payload hash. Read and delete the record before resolving media or submitting; unknown, mismatched, expired and replayed records ask again. Active redemption is exclusive within one process. The storage API has no atomic take: cross-instance concurrent redemption is not guaranteed single-use. Single-instance in-memory storage is supported; retries routed among instances require shared strongly consistent filesystem, Supabase or Cloudflare D1 storage, never eventually consistent Cloudflare KV. Seerr exposes no idempotency key here. `MCP_REQUEST_STATE_KEY` seals record IDs when configured; it does not make redemption atomic. Meaningful `MCP_SESSION_MODE` wins over the declaration; unset values use schema `auto`, resolving to stateful. Explicit stateless HTTP fails the requirement.

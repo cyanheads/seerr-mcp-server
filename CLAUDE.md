@@ -19,7 +19,7 @@ A workflow MCP server over a self-hosted Jellyseerr/Overseerr instance: **search
 
 **Two invariants that must never regress:**
 
-1. **Guarded write.** `seerr_request_media` is the only mutation. It defaults to `mode: preview` (resolve + validate, no POST); the real write fires only on `mode: request` and only once the handler is re-entered with a schema-valid acceptance on `ctx.inputs`, with `destructiveHint: true` surfacing the risk in client-side approval flows. There is no branch that proceeds without an acceptance — a client that never answers leaves the write un-run. Capability validation (4K/seasons/partial) runs locally against cached settings before any POST. The session mode must resolve to `stateful`: the round trip needs a live session for 2025-era clients, and `stateless` refuses it. `src/index.ts` declares `sessionMode: { default: 'stateful', require: 'stateful' }`, so a `stateless` HTTP deployment fails startup with a `ConfigurationError` instead of degrading the tool; stdio is never refused.
+1. **Guarded write.** `seerr_request_media` is the only mutation. It defaults to `mode: preview` (resolve + validate, no POST); the real write fires only on `mode: request` and only after redeeming a matching server-held consent record and reading a schema-valid acceptance on `ctx.inputs`, with `destructiveHint: true` surfacing the risk in client-side approval flows. There is no branch that proceeds without an acceptance — a client that never answers leaves the write un-run. Capability validation (4K/seasons/partial) runs locally against cached settings before any POST. The session mode must resolve to `stateful`: the round trip needs a live session for 2025-era clients, and `stateless` refuses it. `src/index.ts` declares `sessionMode: { require: 'stateful' }`, so a `stateless` HTTP deployment fails startup with a `ConfigurationError` instead of degrading the tool; stdio is never refused.
 2. **PII/infra redaction.** Every raw Jellyseerr payload is projected through `src/services/seerr/normalizers.ts` — the single choke point — before output. It allow-lists fields: `User` → `{ id, displayName }`, and drops operator email, Plex/Jellyfin tokens, `serviceUrl`, `vapidPublic`, and filesystem paths (gated behind `includePaths`). The base URL and API key live only in config and never appear in output. Redaction lives in normalizers, not `format()`, so both `structuredContent` and `content[]` are clean. `ctx.log` is a third output surface — it is dual-sink as of mcp-ts-core 0.12.0, mirroring every call to the client as `notifications/message` — so log only classified reasons and the caller's own inputs, never a raw upstream or network message.
 
 The authoritative tool surface, live API quirks, and status-decoding tables are in [`docs/design.md`](docs/design.md).
@@ -158,7 +158,7 @@ await createApp({
   title: 'seerr-mcp-server',
   tools: allToolDefinitions,
   resources: allResourceDefinitions,
-  sessionMode: { default: 'stateful', require: 'stateful' },
+  sessionMode: { require: 'stateful' },
   instructions:
     'Local Seerr request workflow. Search first (seerr_search_media), confirm the exact title ' +
     '(seerr_get_media), then request via seerr_request_media — which defaults to mode:preview and ' +
@@ -202,7 +202,7 @@ Handlers receive a unified `ctx` object. Key properties:
 
 Handlers throw — the framework catches, classifies, and formats.
 
-**Recommended: typed error contract.** Declare `errors: [{ reason, code, when, recovery, retryable?, severity?, thrownBy? }]` on `tool()` / `resource()` to receive `ctx.fail(reason, …)` typed against the reason union. TypeScript catches typos at compile time, `data.reason` is auto-populated for observability, linter enforces conformance against the handler body. `recovery` is required (≥ 5 words, lint-validated) — the single source of truth for the agent's next move. Spread `ctx.recoveryFor('reason')` into the throw's data to put it on the wire (`data.recovery.hint`, mirrored into `content[]` text unless the message already contains it verbatim); override with an explicit `{ recovery: { hint: '...' } }` when dynamic runtime context matters. Forwarding it is lint-enforced per throw site (`error-contract-recovery-unforwarded`). Mark an entry the service layer throws with `thrownBy: 'service'` so `error-contract-unthrown` skips it — this server's `media_not_found` / `request_not_found` entries are all raised by the `services/seerr/errors.ts` classifier and carry the marker. Baseline codes (`InternalError`, `ServiceUnavailable`, `Timeout`, `ValidationError`, `SerializationError`, `RequestCancelled`) bubble freely and don't need declaring.
+**Recommended: typed error contract.** Declare `errors: [{ reason, code, when, recovery, retryable?, severity?, thrownBy? }]` on `tool()` / `resource()` to receive `ctx.fail(reason, …)` typed against the reason union. TypeScript catches typos at compile time, `data.reason` is auto-populated for observability, linter enforces conformance against the handler body. `recovery` is required (≥ 5 words, lint-validated) — the single source of truth for the agent's next move. The framework puts it on the wire whenever a failure carrying that `reason` arrives without a hint — a bare `ctx.fail('reason')` or a service throw with `data: { reason }` — as `data.recovery.hint`, mirrored into `content[]` text unless the message already contains it verbatim; override with an explicit `{ recovery: { hint: '...' } }` when dynamic runtime context matters. Every error envelope also carries `data.requestId`, the id the server's log records for that call carry, and `content[]` closes with `(reason … · request <id>)`. Mark an entry the service layer throws with `thrownBy: 'service'` so `error-contract-unthrown` skips it — lint-only metadata, nothing at runtime reads it. Baseline codes (`InternalError`, `ServiceUnavailable`, `Timeout`, `ValidationError`, `SerializationError`, `RequestCancelled`) bubble freely and don't need declaring.
 
 ```ts
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
@@ -214,7 +214,7 @@ errors: [
 ],
 async handler(input, ctx) {
   const item = await db.find(input.id);
-  if (!item) throw ctx.fail('no_match', `No item ${input.id}`, { ...ctx.recoveryFor('no_match') });
+  if (!item) throw ctx.fail('no_match', `No item ${input.id}`);
   return item;
 }
 ```
@@ -235,7 +235,7 @@ throw new Error('Invalid query format');     // → ValidationError
 
 // McpError — when no factory exists for the code
 import { McpError, JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-throw new McpError(JsonRpcErrorCode.DatabaseError, 'Connection failed', { pool: 'primary' });
+throw new McpError(JsonRpcErrorCode.InitializationFailed, 'Connection failed', { pool: 'primary' });
 ```
 
 See framework CLAUDE.md and the `api-errors` skill for the full auto-classification table, all available factories, and the contract reference.
@@ -295,7 +295,6 @@ Available skills:
 | `add-test` | Scaffold test file for a tool, resource, or service |
 | `field-test` | Exercise tools/resources/prompts with real inputs, verify behavior, report issues |
 | `tool-defs-analysis` | Read-only audit of MCP definition language across the surface — voice, leaks, defaults, recovery hints, output descriptions |
-| `techniques` | Catalog of reusable response/data-shaping patterns — overflow handling, payload shaping, retrieval |
 | `security-pass` | Audit server for MCP-flavored security gaps: output injection, scope blast radius, input sinks, tenant isolation |
 | `code-simplifier` | Post-session cleanup against `git diff` — modernize syntax, consolidate duplication, align with the codebase |
 | `polish-docs-meta` | Finalize docs, README, metadata, and agent protocol for shipping |
@@ -306,13 +305,14 @@ Available skills:
 | `orchestrations` | Chain task skills into a gated multi-phase pipeline — build-out, QA-fix, update-ship — when you can spawn sub-agents |
 | `report-issue-framework` | File a bug or feature request against `@cyanheads/mcp-ts-core` via `gh` CLI |
 | `report-issue-local` | File a bug or feature request against this server's own repo via `gh` CLI |
+| `techniques` | Catalog of response/data-shaping techniques — overflow handling, payload shaping, retrieval patterns |
 | `api-auth` | Auth modes, scopes, JWT/OAuth |
 | `api-canvas` | DataCanvas: register tabular data, run SQL, export, plus the `spillover()` helper for big result sets — Tier 3 opt-in |
 | `api-config` | AppConfig, parseConfig, env vars |
 | `api-context` | Context interface, RequestContext, logger, state, multi-round-trip input |
 | `api-errors` | McpError, JsonRpcErrorCode, error patterns |
 | `api-linter` | Definition linter rule catalog — invoked by `bun run lint:mcp` and `devcheck` |
-| `api-mirror` | MirrorService — persistent self-refreshing local mirror of a bulk upstream dataset (not used by this server) |
+| `api-mirror` | MirrorService: persistent self-refreshing local mirror (embedded SQLite + FTS5) of a bulk upstream dataset — Tier 3 opt-in |
 | `api-services` | LLM, Speech, Graph services |
 | `api-testing` | createMockContext, test patterns |
 | `api-utils` | Formatting, parsing, security, pagination, scheduling, telemetry helpers |
@@ -356,7 +356,7 @@ When you complete a skill's checklist, check the boxes and add a completion time
 
 ## Bundling
 
-`npm run bundle` produces a `.mcpb` extension bundle for one-click install in Claude Desktop. The pack step is followed by `scripts/clean-mcpb.ts`, which prunes dev dependencies (`mcpb clean`) and strips two classes of `node_modules/**` content that root-anchored `.mcpbignore` patterns cannot reach: dependency-shipped agent docs (`framework-skills/`, `skills/`, `.claude/`, `.agents/`, `SKILL.md`) and platform-specific native bindings, which would otherwise lock the bundle to the platform it was packed on. MCPB is stdio-only — HTTP and Cloudflare Workers deployments are unaffected. Consumers who don't need it can delete `manifest.json` and `.mcpbignore`; `lint:packaging` skips cleanly.
+`npm run bundle` produces a `.mcpb` extension bundle for one-click install in Claude Desktop. The pack step is followed by `scripts/clean-mcpb.ts`, which prunes dev dependencies (`mcpb clean`) and strips two classes of `node_modules/**` content that root-anchored `.mcpbignore` patterns cannot reach: dependency-shipped agent docs (`framework-skills/`, `skills/`, `.claude/`, `.agents/`, `SKILL.md`) and platform-specific native bindings, which would otherwise lock the bundle to the platform it was packed on. A server using DataCanvas therefore ships a portable bundle without the DuckDB native — `@duckdb/node-api` is an optional peer loaded lazily, so canvas tools report an actionable install hint and every other tool works normally. MCPB is stdio-only — HTTP and Cloudflare Workers deployments are unaffected. Consumers who don't need it can delete `manifest.json` and `.mcpbignore`; `lint:packaging` skips cleanly.
 
 **Adding an env var requires both files:** `server.json` (registry discovery, `environmentVariables[]`) and `manifest.json` (bundle install UX, `mcp_config.env` + `user_config`). `lint:packaging` (run by `devcheck`) verifies the env var names match, that every `user_config` option is wired into `mcp_config.env` as `"X": "${user_config.X}"` (the host substitutes nothing else — `"${X}"` reaches the server as that literal string), and that an optional string option carries `"default": ""`.
 
@@ -393,7 +393,7 @@ security: false                            # optional — true ONLY for a source
 
 ## Publishing
 
-**Every release goes through a release PR, straight-through** — `git-wrapup`'s "Release PR mode", mode `straight-through`. One run: `git-wrapup` lands the commit stack on `release/<version>`, pushes it, and opens the PR (title = the release commit subject, body = the changelog entry plus a gates section); `release-and-publish` then fast-forwards `main` locally with `git merge --ff-only`, creates the tag on `main`'s tip, pushes `main` and the tag, deletes the branch, and publishes. A caller's brief may run a given release as `gated` instead — a `release-pr-review` pass on the open PR before `release-and-publish`. **Never merge through the GitHub UI or `gh pr merge`**: squash and rebase-merge are disabled in the repo settings because both rewrite the stack (rebase-merge also strips the SSH signatures), and a merge commit breaks the linear history.
+**Every release goes through a release PR, straight-through** — `git-wrapup`'s "Release PR mode", mode `straight-through`. One run: `git-wrapup` lands the commit stack on `release/<version>`, pushes it, and opens the PR (title = the release commit subject, body = the release digest: theme line, `## Changes`, `## Gates`, changelog link last); `release-and-publish` then fast-forwards `main` locally with `git merge --ff-only`, creates the tag on `main`'s tip, pushes `main` and the tag, deletes the branch, and publishes. A caller's brief may run a given release as `gated` instead — a `release-pr-review` pass on the open PR before `release-and-publish`. **Never merge through the GitHub UI or `gh pr merge`**: squash and rebase-merge are disabled in the repo settings because both rewrite the stack (rebase-merge also strips the SSH signatures), and a merge commit breaks the linear history.
 
 ---
 
@@ -427,3 +427,5 @@ import { getMyService } from '@/services/my-domain/my-service.js';
 - [ ] `.codex-plugin/mcp.json` updated — server name key is the unscoped repo name; every user-supplied variable (API key, instance URL) is listed in `env_vars` so Codex forwards it from the user's environment. Never write `"KEY": ""` into `env` — an empty value replaces the user's exported key and is read as unset
 - [ ] `.claude-plugin/plugin.json` populated — `name`, `version`, `description`, `author`, `repository`, `license`, `keywords` from `package.json`; inline `mcpServers` entry keyed by the unscoped repo name. Every user-supplied variable is declared under `userConfig` (`type`, `title`, `description`; `sensitive: true` for keys and tokens; `required: true` or `default: ""`) and referenced from `env` as `"KEY": "${user_config.<option>}"` — mirror the `user_config` block in `manifest.json`. Never write `"KEY": ""` into `env`
 - [ ] `npm run devcheck` passes
+
+Consent records bind the operation, authenticated client and subject, target, and exact resolved payload hash. Read and delete the record before resolving media or submitting; unknown, mismatched, expired and replayed records ask again. Active redemption is exclusive within one process. The storage API has no atomic take: cross-instance concurrent redemption is not guaranteed single-use. Single-instance in-memory storage is supported; retries routed among instances require shared strongly consistent filesystem, Supabase or Cloudflare D1 storage, never eventually consistent Cloudflare KV. Seerr exposes no idempotency key here. `MCP_REQUEST_STATE_KEY` seals record IDs when configured; it does not make redemption atomic. Meaningful `MCP_SESSION_MODE` wins over the declaration; unset values use schema `auto`, resolving to stateful. Explicit stateless HTTP fails the requirement.

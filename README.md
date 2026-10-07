@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.1.4-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.0.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/seerr-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/seerr-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.0-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.1.4-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.2.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/seerr-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/seerr-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.2-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -48,11 +48,9 @@ All request data is also reachable via tools — request enumeration is the job 
 
 ### `seerr_search_media` <sub>tool</sub>
 
-- Free-text title query matched against TMDB; `mediaType` filters to `movie` / `tv` / `all` (people always excluded)
-- Decoded availability (`status`, plus `status4k` when 4K is enabled) only for titles Jellyseerr already tracks
-- `page` pagination (1–1000); `limit` caps returned results per call (1–20, default 10)
-- Optional ISO 639-1 `language` override for localized titles/overviews
-- Empty results are a normal success — returns `[]` with a guidance notice, not an error
+- Search titles with `mediaType: movie | tv | all`; people are excluded. `page` is 1–1000; `limit` is 1–20, default 10.
+- Returns TMDB matches and decoded `status` / `status4k` for tracked titles. Empty results return `[]` with a guidance notice.
+- Optional ISO 639-1 `language` selects localized titles and overviews.
 
 ---
 
@@ -66,54 +64,46 @@ All request data is also reachable via tools — request enumeration is the job 
 
 ### `seerr_list_requests` <sub>tool</sub>
 
-- Lifecycle `filter` (pending, processing, available, failed, …), `mediaType`, and `requestedById` filters
-- Sort by created (`added`) or last-changed (`modified`), ascending or descending
-- `take` (1–100, default 20) / `skip` pagination; the enrichment trailer echoes the applied filter set
-- Requester is PII-redacted to `{ id, displayName }`
-- Titles aren't on request objects — `includeTitles: true` joins them from media records (one lookup per distinct title, default off); unresolved rows keep every other field and are disclosed in the notice
+- Filter by lifecycle `filter`, `mediaType`, and `requestedById`; sort by `added` or `modified`, ascending or descending. `take` is 1–100, default 20; `skip` selects the offset.
+- Returns decoded statuses, requester `{ id, displayName }`, and an enrichment trailer with applied filters.
+- `includeTitles: true` joins media titles once per distinct title (default off); unresolved rows retain their data and are disclosed in the notice.
 
 ---
 
 ### `seerr_request_media` <sub>tool</sub>
 
-- **Guarded write.** `mode: preview` (default) resolves the title and returns the exact `POST /request` payload that would be submitted, with no write; `mode: request` submits only after an explicit confirmation round comes back accepted — declining, cancelling, or an invalid answer cancels before submission (`request_cancelled`), and `destructiveHint: true` flags the risk to client approval flows
-- Runs `stateful` by design — a 2025-era client answers the confirmation over a live session, which `stateless` can't hold open. The server declares that posture itself, so an HTTP deployment that sets `MCP_SESSION_MODE=stateless` fails at startup rather than serving an unusable tool
-- Capability validation (4K enabled? seasons valid? partial requests allowed?) runs locally against cached instance settings before any POST, so a bad request fails with a typed error instead of a failed write
-- TV requests take `seasons: "all"` or an explicit list (e.g. `[1, 2]`); season 0 (Specials) is rejected unless the instance enables it
-- Optional routing overrides — `serverId`, `profileId`, `rootFolder`, `languageProfileId` — omit to use Jellyseerr's defaults (recommended)
-- An existing request for the title surfaces in the output; a duplicate rejection from Jellyseerr maps to a typed `duplicate_request` pointing back at it
+- **Guarded write.** `mode: preview` (default) returns the resolved title and exact `POST /request` payload without writing. `mode: request` asks for confirmation bound to the same caller, title and payload; declined, cancelled or invalid answers return `request_cancelled`.
+- TV requests require `seasons: "all"` or a list such as `[1, 2]`; season 0 (Specials) requires special episodes to be enabled. Instance capability checks run before any POST; existing requests appear in output and duplicate rejections return `duplicate_request`.
+- Optional routing overrides: `serverId`, `profileId`, `rootFolder`, `languageProfileId`. Omit them to use Jellyseerr's defaults.
 
 ---
 
 ### `seerr_request_status` <sub>tool</sub>
 
-- Wraps `GET /request/{id}`; `requestId` comes from `seerr_request_media`'s `created.requestId` or `seerr_list_requests`
-- Returns decoded `requestStatus` and `mediaStatus`/`mediaStatus4k`, requester (`{ id, displayName }`), and a routing summary (`serverId`, `profileName`, `is4k` — no filesystem paths)
-- `title` is joined from the media detail endpoint on every call (no opt-in flag needed) and omitted when the request has no `tmdbId` or the lookup fails
-- `stateGuidance` returns a next-step hint tuned to the current status
-- A missing request ID surfaces as a typed `request_not_found` (Jellyseerr's raw HTTP 404 is classified in the service layer)
+- Accepts `requestId` from `seerr_request_media`'s `created.requestId` or `seerr_list_requests`. A missing request returns `request_not_found`.
+- Returns decoded `requestStatus`, `mediaStatus` / `mediaStatus4k`, requester `{ id, displayName }`, routing (`serverId`, `profileName`, `is4k`), and `stateGuidance`.
+- Joins `title` on each call; it is absent when no `tmdbId` exists or the lookup fails.
 
 ---
 
 ### `seerr_service_options` <sub>tool</sub>
 
-- Instance capability summary: Jellyseerr version, media server, and the `movie4kEnabled` / `series4kEnabled` / `partialRequestsEnabled` / `specialEpisodesEnabled` flags
-- Per-service routing: server ID, default-server flag, 4K capability, and the active + available quality profiles (IDs and names, safe to surface)
-- Filesystem root-folder paths and free space are operator-private — omitted unless `includePaths: true`
-- One failed service leg (Radarr/Sonarr detail, settings, or version) degrades to a disclosed notice instead of failing the whole call
+- Returns instance version, media server, capability flags (`movie4kEnabled`, `series4kEnabled`, `partialRequestsEnabled`, `specialEpisodesEnabled`), and service IDs, defaults and quality profiles.
+- Failed service legs retain the available results with a notice.
+- `includePaths: true` exposes root-folder paths and free space; both are omitted by default.
 
 ---
 
 ### `seerr://request/{requestId}` <sub>resource</sub>
 
-- Mirrors `seerr_request_status` — same `projectRequestDetail` redaction choke point and title join, so the output is identical and equally PII-clean
-- `requestId` comes from `seerr_request_media` or `seerr_list_requests`
-- No per-read options — title is always joined (one request, one extra read); absent when there's no `tmdbId` or the lookup fails
-- A missing request ID surfaces as a typed `request_not_found`
+- Accepts `requestId` from `seerr_request_media` or `seerr_list_requests`; a missing request returns `request_not_found`.
+- Mirrors `seerr_request_status`, including redaction and a title join. `title` is absent when no `tmdbId` exists or the lookup fails; resources take no per-read options.
 
 ## Features
 
 Built on [`@cyanheads/mcp-ts-core`](https://github.com/cyanheads/mcp-ts-core): stdio and Streamable HTTP transports, pluggable auth (`none` / `jwt` / `oauth`), swappable storage (`in-memory`, `filesystem`, `Supabase`, `Cloudflare KV/R2/D1`), structured logging with optional OpenTelemetry tracing.
+
+HTTP requires stateful sessions for 2025-era confirmation rounds; explicit `MCP_SESSION_MODE=stateless` fails startup. Consent records expire after ten minutes and changed or replayed records ask again. Redemption excludes concurrent retries in one process; request creation makes one POST attempt without automatic retries. Cross-instance read-and-delete is not atomic: use shared strongly consistent filesystem, Supabase or Cloudflare D1 storage for routed retries, and account for duplicate-submission races; Cloudflare KV is unsuitable for consent records.
 
 Seerr-specific:
 
@@ -224,7 +214,12 @@ All configuration is validated at startup via Zod schemas in `src/config/server-
 | `MCP_LOG_LEVEL` | Log level (RFC 5424). | `info` |
 | `LOGS_DIR` | Directory for log files (Node.js only). | `<project-root>/logs` |
 | `STORAGE_PROVIDER_TYPE` | Storage backend. | `in-memory` |
+| `MCP_SESSION_MODE` | HTTP session mode; must resolve to stateful for confirmation rounds. The example and Docker image set stateful; an unset value uses auto, resolving to stateful. Explicit stateless fails startup. | `auto` |
+| `MCP_REQUEST_STATE_KEY` | Optional key of at least 32 bytes, shared across instances, that seals consent record IDs. | — |
 | `OTEL_ENABLED` | Enable [OpenTelemetry instrumentation](https://github.com/cyanheads/mcp-ts-core/tree/main/docs/telemetry). | `false` |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP base for traces and metrics; signal-specific endpoints override it. | — |
+| `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` | Opt-in log export endpoint; the base endpoint never enables logs. | — |
+| `LOG_TOOL_FAILURE_PAYLOADS` | Opt-in failed-call arguments/result logging; redaction matches key names, so secrets in free-form values can remain. | `false` |
 
 See [`.env.example`](./.env.example) for the full list of optional overrides.
 
@@ -263,7 +258,7 @@ docker run --rm \
   seerr-mcp-server
 ```
 
-The Dockerfile defaults to HTTP transport, stateless session mode, and logs to `/var/log/seerr-mcp-server`. OpenTelemetry peer dependencies are installed by default — build with `--build-arg OTEL_ENABLED=false` to omit them.
+The Dockerfile defaults to HTTP transport, stateful session mode, and logs to `/var/log/seerr-mcp-server`. OpenTelemetry peer dependencies are installed by default — build with `--build-arg OTEL_ENABLED=false` to omit them.
 
 ## Project structure
 

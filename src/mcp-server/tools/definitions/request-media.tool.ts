@@ -8,7 +8,8 @@
  * Three-layer guard:
  *   1. mode:preview is the blast-radius-safe default (resolve + validate, no POST).
  *   2. mode:request suspends on ctx.requestInput and writes only when the caller
- *      re-enters the handler with a schema-valid acceptance on ctx.inputs. There is
+ *      re-enters with a matching, single-use server-held consent record and a
+ *      schema-valid acceptance on ctx.inputs. There is
  *      no "proceed anyway" branch: a client that never answers leaves the write
  *      un-run, which fails safe.
  *   3. destructiveHint:true surfaces the risk in client-side approval flows.
@@ -19,6 +20,8 @@
  * @module mcp-server/tools/definitions/request-media.tool
  */
 
+import { createHash, randomUUID } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import { inputRequired, tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { redactOpenRequest } from '@/services/seerr/normalizers.js';
@@ -33,6 +36,16 @@ import type { CreateRequestBody, RawMediaInfo } from '@/services/seerr/types.js'
 
 /** Identifier the confirmation round is filed under across both rounds of the write. */
 const CONFIRM_KEY = 'confirm';
+
+const ConsentSchema = z.object({
+  operation: z.string(),
+  clientId: z.string(),
+  subject: z.string(),
+  target: z.string(),
+  contentHash: z.string(),
+});
+/** Prevent simultaneous redemption in this process; storage has no atomic take. */
+const redeeming = new Set<string>();
 
 /**
  * Shape of the confirmation response. Passed to BOTH the request and the read:
@@ -236,6 +249,17 @@ export const requestMediaTool = tool('seerr_request_media', {
   ],
 
   async handler(input, ctx) {
+    const id = ctx.inputs.state();
+    let record: z.infer<typeof ConsentSchema> | null = null;
+    if (typeof id === 'string' && /^[0-9a-f-]{36}$/.test(id) && !redeeming.has(id)) {
+      redeeming.add(id);
+      try {
+        record = await ctx.state.get(`consent/${id}`, ConsentSchema);
+        if (record) await ctx.state.delete(`consent/${id}`);
+      } finally {
+        redeeming.delete(id);
+      }
+    }
     const seerr = getSeerrService();
 
     // Step 1 — capability flags (cached). Step 2 — resolve title + existing requests.
@@ -323,7 +347,17 @@ export const requestMediaTool = tool('seerr_request_media', {
      * or unparseable — is terminal: re-issuing the same request would loop until the
      * round budget runs out, and it is never consent.
      */
-    if (ctx.inputs.view(CONFIRM_KEY).kind === 'missing') {
+    const expected = {
+      operation: 'seerr_request_media',
+      clientId: ctx.auth?.clientId ?? '',
+      subject: ctx.auth?.sub ?? '',
+      target: `${input.mediaType}/${input.tmdbId}`,
+      contentHash: createHash('sha256').update(JSON.stringify({ resolved, payload })).digest('hex'),
+    };
+    const matches = record !== null && isDeepStrictEqual(record, expected);
+    if (!matches || ctx.inputs.view(CONFIRM_KEY).kind === 'missing') {
+      const fresh = randomUUID();
+      await ctx.state.set(`consent/${fresh}`, expected, { ttl: 600 });
       const seasonSummary =
         input.mediaType === 'tv'
           ? input.seasons === 'all'
@@ -333,6 +367,7 @@ export const requestMediaTool = tool('seerr_request_media', {
               : ''
           : '';
       return ctx.requestInput({
+        requestState: fresh,
         inputRequests: {
           [CONFIRM_KEY]: inputRequired.elicit({
             message: `Create a Seerr request for "${title}"${input.is4k ? ' (4K)' : ''}${seasonSummary}? This adds it to your Radarr/Sonarr download queue.`,
