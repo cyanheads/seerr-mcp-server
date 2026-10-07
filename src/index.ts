@@ -25,7 +25,7 @@ await createApp({
    * deployment into a startup ConfigurationError instead of a silently unusable
    * `seerr_request_media`; a stdio start is never refused.
    */
-  sessionMode: { default: 'stateful', require: 'stateful' },
+  sessionMode: { require: 'stateful' },
   instructions:
     'Local Seerr request workflow. Search first (seerr_search_media), confirm the exact title ' +
     '(seerr_get_media), then request via seerr_request_media — which defaults to mode:preview and ' +

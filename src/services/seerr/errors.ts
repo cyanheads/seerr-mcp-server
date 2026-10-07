@@ -21,7 +21,7 @@
  * @module services/seerr/errors
  */
 
-import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
+import { notFound } from '@cyanheads/mcp-ts-core/errors';
 import { httpErrorFromResponse } from '@cyanheads/mcp-ts-core/utils';
 
 /** Which not-found-bearing endpoint a classified response belongs to. */
@@ -59,20 +59,16 @@ export async function throwClassifiedSeerrError(
     (response.status === 500 || response.status === 404) &&
     MEDIA_NOT_FOUND_BODY.test(body)
   ) {
-    throw new McpError(
-      JsonRpcErrorCode.NotFound,
-      'Unable to retrieve the requested title from Seerr.',
-      {
-        reason: 'media_not_found',
-        httpStatus: response.status,
-        retryable: false,
-        recovery: { hint: MEDIA_NOT_FOUND_RECOVERY },
-      },
-    );
+    throw notFound('Unable to retrieve the requested title from Seerr.', {
+      reason: 'media_not_found',
+      httpStatus: response.status,
+      retryable: false,
+      recovery: { hint: MEDIA_NOT_FOUND_RECOVERY },
+    });
   }
 
   if (kind === 'request' && response.status === 404 && REQUEST_NOT_FOUND_BODY.test(body)) {
-    throw new McpError(JsonRpcErrorCode.NotFound, 'Request not found.', {
+    throw notFound('Request not found.', {
       reason: 'request_not_found',
       httpStatus: response.status,
       retryable: false,

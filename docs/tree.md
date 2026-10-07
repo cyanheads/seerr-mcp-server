@@ -1,6 +1,6 @@
 # seerr-mcp-server - Directory Structure
 
-Generated on: 2026-09-20 20:40:47
+Generated on: 2026-10-07 12:36:07
 
 ```text
 seerr-mcp-server/
@@ -126,9 +126,11 @@ seerr-mcp-server/
 │   ├── clean-mcpb.ts
 │   ├── clean.ts
 │   ├── devcheck.ts
+│   ├── install-otel.ts
 │   ├── lint-mcp.ts
 │   ├── lint-packaging.ts
 │   ├── list-skills.ts
+│   ├── prune-musl-packages.ts
 │   ├── release-github.ts
 │   └── tree.ts
 ├── src/
