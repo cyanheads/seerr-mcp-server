@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.5](changelog/0.1.x/0.1.5.md) — 2026-10-07 · 🛡️ Security
+
+Binds confirmations to the caller and exact media payload, prevents automatic POST retries, and upgrades mcp-ts-core from 0.13.6 to 0.13.13 with input repair, clearer errors and current packaging.
+
 ## [0.1.4](changelog/0.1.x/0.1.4.md) — 2026-09-20 · ⚠️ Breaking
 
 Adopts mcp-ts-core 0.13.6: the HTTP session posture is declared in src/ so a stateless deployment fails startup instead of serving an unusable guarded write, argument rejections reach callers as InvalidParams with a recovery hint, and the framework skill tree moves to framework-skills/.

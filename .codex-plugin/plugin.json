@@ -1,6 +1,6 @@
 {
   "name": "seerr-mcp-server",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Search Jellyseerr/Overseerr, check availability, and create guarded media requests.",
   "author": {
     "name": "Casey Hand",
