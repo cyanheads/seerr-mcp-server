@@ -51,7 +51,7 @@ Seerr exposes OpenAPI 3.0.2 at `/api/v1` (base path). The local instance probed 
 - **Base URL:** `SEERR_BASE_URL` (e.g. `http://localhost:5055`); the service appends `/api/v1`.
 - **Read + guarded-request only.** First release deliberately excludes everything `X-Api-Key`'s admin reach makes *possible*: user/admin management, settings updates, sync jobs, media/file deletion, issue management, watchlist/blocklist writes, and request approval/decline. See **Admin-scope exclusions**.
 - **Two-step guarded write.** `seerr_request_media` defaults to `mode: preview` (resolve + preview, no POST). The actual `POST /request` fires only on `mode: request`, gated by a `ctx.requestInput` confirmation round that must come back accepted, with `destructiveHint` surfacing the risk in client-side approval flows.
-- **Status decoding everywhere.** Every output that carries a request or media status emits both the decoded label and the raw number. Request status: `1=pending`, `2=approved`, `3=declined`. Media status: `1=unknown`, `2=pending`, `3=processing`, `4=partially_available`, `5=available`, `6=deleted`. Media carries a **second** `status4k` field on the same scale — decode it too.
+- **Status decoding everywhere.** Every output that carries a request or media status emits both the decoded label and the raw number. Request status: `1=pending` through `5=completed`; media status: `1=unknown` through `7=deleted` (full tables under **Status Decoding (canonical)**). Media carries a **second** `status4k` field on the same scale — decode it too.
 - **Error normalization.** Seerr returns **HTTP 500 `{"message":"Unable to retrieve movie."}`** for a missing movie (confirmed live). Map to a domain `media_not_found` with a search-recovery hint — never surface a raw 500.
 - **PII / infra redaction.** Raw Seerr objects leak operator data (see **PII & path redaction**). Project `User` → `{ id, displayName }`, drop tokens/email/avatars; strip `serviceUrl`/`serviceUrl4k` (internal host:port); redact Radarr/Sonarr `activeDirectory` and root-folder `path` unless explicitly requested.
 - **Capped lists disclose truncation** via the `enrichment` block (optional `truncated`/`shown`/`cap`; required `totalCount` via the total enricher) — see **Output & enrichment conventions**.
@@ -759,7 +759,7 @@ Live probe of `/service/sonarr/0` returned `languageProfiles: null`. Added to sp
 
 ### Items confirmed correct (no changes)
 
-- Status decoding tables (request: 1-3, media: 1-6) — matches OpenAPI spec and live payloads.
+- Status decoding tables (request: 1-5, media: 1-7) — match the OpenAPI spec and live payloads.
 - HTTP 500 `{"message":"Unable to retrieve movie."}` for missing TMDB IDs — confirmed live.
 - `numberOfSeasons` plural on TV detail — confirmed live (`/tv/1399`).
 - Guarded write design (preview default + confirmation round + `destructiveHint`) — structurally sound.
