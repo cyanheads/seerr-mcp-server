@@ -9,6 +9,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
 import {
   redactAvailability,
   redactEpisode,
@@ -185,11 +186,12 @@ export const getMediaTool = tool('seerr_get_media', {
   format: (result) => {
     const lines: string[] = [];
     const yearPart = result.year !== undefined ? ` (${result.year})` : '';
-    lines.push(`# ${result.title}${yearPart} — ${result.mediaType}`);
+    lines.push(`# ${escapeMarkdownInline(result.title)}${yearPart} — ${result.mediaType}`);
     const facts = [`**TMDB ID:** ${result.tmdbId}`];
     if (result.runtimeMinutes !== undefined)
       facts.push(`**Runtime:** ${result.runtimeMinutes} min`);
-    if (result.productionStatus) facts.push(`**Status:** ${result.productionStatus}`);
+    if (result.productionStatus)
+      facts.push(`**Status:** ${escapeMarkdownInline(result.productionStatus)}`);
     lines.push(facts.join(' | '));
 
     const a = result.availability;
@@ -204,14 +206,14 @@ export const getMediaTool = tool('seerr_get_media', {
     }
     if (result.overview) {
       lines.push('');
-      lines.push(result.overview);
+      lines.push(escapeMarkdownInline(result.overview));
     }
     if (result.seasons && result.seasons.length > 0) {
       lines.push('');
       lines.push('## Seasons');
       for (const s of result.seasons) {
         lines.push(
-          `- **S${s.seasonNumber} ${s.name}** — ${s.episodeCount} episodes${s.airDate ? ` (aired ${s.airDate})` : ''}`,
+          `- **S${s.seasonNumber} ${escapeMarkdownInline(s.name)}** — ${s.episodeCount} episodes${s.airDate ? ` (aired ${escapeMarkdownInline(s.airDate)})` : ''}`,
         );
       }
     }
@@ -219,8 +221,10 @@ export const getMediaTool = tool('seerr_get_media', {
       lines.push('');
       lines.push('## Episodes');
       for (const e of result.episodes) {
-        lines.push(`- **E${e.episodeNumber} ${e.name}**${e.airDate ? ` (${e.airDate})` : ''}`);
-        if (e.overview) lines.push(`  ${e.overview}`);
+        lines.push(
+          `- **E${e.episodeNumber} ${escapeMarkdownInline(e.name)}**${e.airDate ? ` (${escapeMarkdownInline(e.airDate)})` : ''}`,
+        );
+        if (e.overview) lines.push(`  ${escapeMarkdownInline(e.overview)}`);
       }
     }
     return [{ type: 'text', text: lines.join('\n') }];

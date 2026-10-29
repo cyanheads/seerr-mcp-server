@@ -13,6 +13,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
 import { projectRequestDetail } from '@/services/seerr/normalizers.js';
 import { getSeerrService } from '@/services/seerr/seerr-service.js';
 import { StatusRef, statusText } from '@/services/seerr/status.js';
@@ -100,7 +101,7 @@ export const requestStatusTool = tool('seerr_request_status', {
   format: (result) => {
     const lines: string[] = [];
     lines.push(
-      `# Request #${result.requestId} — ${result.title ?? 'Untitled'} (${result.mediaType}, 4K=${result.is4k})`,
+      `# Request #${result.requestId} — ${result.title !== undefined ? escapeMarkdownInline(result.title) : 'Untitled'} (${result.mediaType}, 4K=${result.is4k})`,
     );
     lines.push(`**TMDB ID:** ${result.tmdbId ?? 'n/a'}`);
 
@@ -109,18 +110,21 @@ export const requestStatusTool = tool('seerr_request_status', {
     if (result.mediaStatus4k) status.push(`**Media 4K:** ${statusText(result.mediaStatus4k)}`);
     lines.push(status.join(' | '));
 
-    lines.push(`**Requested by:** ${result.requestedBy.displayName} (id ${result.requestedBy.id})`);
+    lines.push(
+      `**Requested by:** ${escapeMarkdownInline(result.requestedBy.displayName)} (id ${result.requestedBy.id})`,
+    );
     const routing = [`**Routed 4K=${result.routing.is4k}**`];
     if (result.routing.serverId !== undefined)
       routing.push(`**Server ID:** ${result.routing.serverId}`);
-    if (result.routing.profileName) routing.push(`**Profile:** ${result.routing.profileName}`);
+    if (result.routing.profileName)
+      routing.push(`**Profile:** ${escapeMarkdownInline(result.routing.profileName)}`);
     lines.push(routing.join(' | '));
 
     if (result.seasons && result.seasons.length > 0)
       lines.push(`**Seasons:** ${result.seasons.join(', ')}`);
     const timestamps: string[] = [];
-    if (result.createdAt) timestamps.push(`**Created:** ${result.createdAt}`);
-    if (result.updatedAt) timestamps.push(`**Updated:** ${result.updatedAt}`);
+    if (result.createdAt) timestamps.push(`**Created:** ${escapeMarkdownInline(result.createdAt)}`);
+    if (result.updatedAt) timestamps.push(`**Updated:** ${escapeMarkdownInline(result.updatedAt)}`);
     if (timestamps.length > 0) lines.push(timestamps.join(' | '));
     if (result.stateGuidance) {
       lines.push('');

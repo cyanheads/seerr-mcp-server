@@ -2,8 +2,8 @@
  * @fileoverview Tests for seerr_get_media. Headline: fetch exact movie/TV detail by
  * TMDB ID to confirm the title before a write. Covers: movie detail with
  * runtime/status, TV per-season summary, the seasonNumber episode-list branch, the
- * openRequest derived from mediaInfo.requests (PII-redacted), and the media_not_found
- * contract bubbling from the service.
+ * openRequest derived from mediaInfo.requests (PII-redacted), the media_not_found
+ * contract bubbling from the service, and season/episode rendering in format().
  * @module tests/tools/get-media.tool.test
  */
 
@@ -162,5 +162,38 @@ describe('seerr_get_media — TV', () => {
     expect(result.episodes).toEqual([
       { episodeNumber: 1, name: 'Winter Is Coming', airDate: '2011-04-17', overview: 'Pilot.' },
     ]);
+  });
+});
+
+describe('seerr_get_media — format', () => {
+  it('renders season and episode lines with upstream names escaped', () => {
+    const blocks = getMediaTool.format!({
+      tmdbId: 1399,
+      mediaType: 'tv',
+      title: 'Game of Thrones',
+      availability: { tracked: false, status: { raw: 1, label: 'unknown' } },
+      seasons: [{ seasonNumber: 1, name: 'Season *1*', episodeCount: 10, airDate: '2011-04-17' }],
+      episodes: [
+        { episodeNumber: 1, name: '[Pilot]', airDate: '2011-04-17', overview: 'Winter_is_coming.' },
+      ],
+    });
+    const text = (blocks[0] as { text: string }).text;
+    expect(text).toContain('- **S1 Season \\*1\\*** — 10 episodes (aired 2011-04-17)');
+    expect(text).toContain('- **E1 \\[Pilot\\]** (2011-04-17)');
+    expect(text).toContain('  Winter_is_coming.');
+  });
+
+  it('escapes upstream air dates', () => {
+    const blocks = getMediaTool.format!({
+      tmdbId: 1399,
+      mediaType: 'tv',
+      title: 'Game of Thrones',
+      availability: { tracked: false, status: { raw: 1, label: 'unknown' } },
+      seasons: [{ seasonNumber: 1, name: 'Season 1', episodeCount: 10, airDate: '2011 *x*' }],
+      episodes: [{ episodeNumber: 1, name: 'Pilot', airDate: '<b>2011</b>' }],
+    });
+    const text = (blocks[0] as { text: string }).text;
+    expect(text).toContain('(aired 2011 \\*x\\*)');
+    expect(text).toContain('- **E1 Pilot** (\\<b>2011\\</b>)');
   });
 });

@@ -144,6 +144,13 @@ describe('seerr_request_status', () => {
     expect(result.title).toBe('Avengers: Endgame');
     const text = (requestStatusTool.format!(result)[0] as { text: string }).text;
     expect(text).toContain('Request #47 — Avengers: Endgame');
+
+    const dated = (
+      requestStatusTool.format!({ ...result, createdAt: '2026 *x*', updatedAt: '<i>u</i>' })[0] as {
+        text: string;
+      }
+    ).text;
+    expect(dated).toContain('**Created:** 2026 \\*x\\* | **Updated:** \\<i>u\\</i>');
   });
 
   it('reads the TV title from `name` on a tv request', async () => {

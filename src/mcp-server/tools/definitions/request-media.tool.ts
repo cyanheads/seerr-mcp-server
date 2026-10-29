@@ -24,6 +24,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { inputRequired, tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
+import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
 import { redactOpenRequest } from '@/services/seerr/normalizers.js';
 import { getSeerrService } from '@/services/seerr/seerr-service.js';
 import {
@@ -427,7 +428,7 @@ export const requestMediaTool = tool('seerr_request_media', {
     const r = result.resolved;
     const yearPart = r.year !== undefined ? ` (${r.year})` : '';
     const verb = result.mode === 'preview' ? 'Preview' : 'Request submitted';
-    lines.push(`# ${verb}: ${r.title}${yearPart} — ${r.mediaType}`);
+    lines.push(`# ${verb}: ${escapeMarkdownInline(r.title)}${yearPart} — ${r.mediaType}`);
     lines.push(`**TMDB ID:** ${r.tmdbId}`);
     lines.push(
       `**Capability:** 4K ${result.capability.is4kEnabled ? 'enabled' : 'disabled'} | partial requests ${result.capability.partialRequestsEnabled ? 'enabled' : 'disabled'}`,
@@ -439,7 +440,8 @@ export const requestMediaTool = tool('seerr_request_media', {
       payloadFacts.push(`seasons=${p.seasons === 'all' ? 'all' : p.seasons.join(',')}`);
     if (p.serverId !== undefined) payloadFacts.push(`serverId=${p.serverId}`);
     if (p.profileId !== undefined) payloadFacts.push(`profileId=${p.profileId}`);
-    if (p.rootFolder !== undefined) payloadFacts.push(`rootFolder=${p.rootFolder}`);
+    if (p.rootFolder !== undefined)
+      payloadFacts.push(`rootFolder=${escapeMarkdownInline(p.rootFolder)}`);
     if (p.languageProfileId !== undefined)
       payloadFacts.push(`languageProfileId=${p.languageProfileId}`);
     lines.push(`**Payload:** ${payloadFacts.join(', ')}`);

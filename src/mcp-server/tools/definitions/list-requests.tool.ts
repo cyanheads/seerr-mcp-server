@@ -11,6 +11,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
+import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
 import { normalizeSeasons, redactUser } from '@/services/seerr/normalizers.js';
 import { getSeerrService } from '@/services/seerr/seerr-service.js';
 import {
@@ -281,7 +282,7 @@ export const listRequestsTool = tool('seerr_list_requests', {
     const lines: string[] = [];
     for (const r of result.requests) {
       lines.push(
-        `## Request #${r.requestId} — ${r.title ?? 'Untitled'} (${r.mediaType}, 4K=${r.is4k})`,
+        `## Request #${r.requestId} — ${r.title !== undefined ? escapeMarkdownInline(r.title) : 'Untitled'} (${r.mediaType}, 4K=${r.is4k})`,
       );
       const facts = [
         `**TMDB ID:** ${r.tmdbId ?? 'n/a'}`,
@@ -289,8 +290,10 @@ export const listRequestsTool = tool('seerr_list_requests', {
       ];
       if (r.mediaStatus) facts.push(`**Media:** ${statusText(r.mediaStatus)}`);
       if (r.mediaStatus4k) facts.push(`**Media 4K:** ${statusText(r.mediaStatus4k)}`);
-      facts.push(`**Requested by:** ${r.requestedBy.displayName} (id ${r.requestedBy.id})`);
-      if (r.createdAt) facts.push(`**Created:** ${r.createdAt}`);
+      facts.push(
+        `**Requested by:** ${escapeMarkdownInline(r.requestedBy.displayName)} (id ${r.requestedBy.id})`,
+      );
+      if (r.createdAt) facts.push(`**Created:** ${escapeMarkdownInline(r.createdAt)}`);
       lines.push(facts.join(' | '));
       if (r.seasons && r.seasons.length > 0) lines.push(`**Seasons:** ${r.seasons.join(', ')}`);
       lines.push('');

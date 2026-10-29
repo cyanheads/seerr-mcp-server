@@ -129,4 +129,21 @@ describe('seerr_search_media', () => {
     expect(text).toContain('1275779');
     expect(text).toContain('available (5)');
   });
+
+  it('escapes Markdown syntax in upstream title and overview so content[] reads back as written', () => {
+    const blocks = searchMediaTool.format!({
+      results: [
+        {
+          tmdbId: 1,
+          mediaType: 'tv',
+          title: '*NSYNC: [Live]',
+          overview: 'The _final_ tour.',
+          tracked: false,
+        },
+      ],
+    });
+    const text = (blocks[0] as { text: string }).text;
+    expect(text).toContain('## \\*NSYNC: \\[Live\\] — tv');
+    expect(text).toContain('The \\_final\\_ tour.');
+  });
 });

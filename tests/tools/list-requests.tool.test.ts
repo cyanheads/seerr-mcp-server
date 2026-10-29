@@ -317,4 +317,22 @@ describe('seerr_list_requests', () => {
     expect(text).toContain('approved (2)');
     expect(text).toContain('mediauser');
   });
+
+  it('escapes the upstream createdAt string', () => {
+    const blocks = listRequestsTool.format!({
+      requests: [
+        {
+          requestId: 46,
+          mediaType: 'movie',
+          tmdbId: 1,
+          requestStatus: { raw: 1, label: 'pending' },
+          is4k: false,
+          requestedBy: { id: 1, displayName: 'mediauser' },
+          createdAt: '2026 *x*',
+        },
+      ],
+    });
+    const text = (blocks[0] as { text: string }).text;
+    expect(text).toContain('**Created:** 2026 \\*x\\*');
+  });
 });

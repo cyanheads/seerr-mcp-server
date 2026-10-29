@@ -8,6 +8,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
+import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
 import { redactAvailability } from '@/services/seerr/normalizers.js';
 import { getSeerrService } from '@/services/seerr/seerr-service.js';
 import { StatusRef, statusText } from '@/services/seerr/status.js';
@@ -184,7 +185,7 @@ export const searchMediaTool = tool('seerr_search_media', {
     const lines: string[] = [];
     for (const r of result.results) {
       const yearPart = r.year !== undefined ? ` (${r.year})` : '';
-      lines.push(`## ${r.title}${yearPart} — ${r.mediaType}`);
+      lines.push(`## ${escapeMarkdownInline(r.title)}${yearPart} — ${r.mediaType}`);
       const facts = [`**TMDB ID:** ${r.tmdbId}`];
       if (r.voteAverage !== undefined) facts.push(`**Rating:** ${r.voteAverage.toFixed(1)}/10`);
       facts.push(`**Tracked by Seerr:** ${r.tracked ? 'Yes' : 'No'}`);
@@ -195,7 +196,7 @@ export const searchMediaTool = tool('seerr_search_media', {
           : '';
         lines.push(`**Availability:** ${statusText(r.availability.status)}${fourK}`);
       }
-      if (r.overview) lines.push(r.overview);
+      if (r.overview) lines.push(escapeMarkdownInline(r.overview));
       lines.push('');
     }
     return [{ type: 'text', text: lines.join('\n').trimEnd() }];

@@ -12,6 +12,7 @@
 
 import type { Context } from '@cyanheads/mcp-ts-core';
 import { tool, z } from '@cyanheads/mcp-ts-core';
+import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
 import { redactProfile, redactRootFolder } from '@/services/seerr/normalizers.js';
 import { getSeerrService, type SeerrService } from '@/services/seerr/seerr-service.js';
 import { decodeMediaServer } from '@/services/seerr/status.js';
@@ -228,23 +229,27 @@ export const serviceOptionsTool = tool('seerr_service_options', {
   format: (result) => {
     const lines: string[] = [];
     const i = result.instance;
-    lines.push(`# Seerr ${i.version} — ${i.mediaServer}`);
+    lines.push(`# Seerr ${escapeMarkdownInline(i.version)} — ${i.mediaServer}`);
     lines.push(
       `**4K movies:** ${i.movie4kEnabled} | **4K series:** ${i.series4kEnabled} | **Partial requests:** ${i.partialRequestsEnabled} | **Specials:** ${i.specialEpisodesEnabled}`,
     );
     for (const s of result.services) {
       lines.push('');
-      lines.push(`## ${s.name} — ${s.kind}${s.isDefault ? ' [default]' : ''}`);
+      lines.push(
+        `## ${escapeMarkdownInline(s.name)} — ${s.kind}${s.isDefault ? ' [default]' : ''}`,
+      );
       lines.push(
         `**Server ID:** ${s.serverId} | **4K:** ${s.is4k ? 'Yes' : 'No'} | **Default profile ID:** ${s.activeProfileId}`,
       );
       if (s.profiles && s.profiles.length > 0) {
-        lines.push(`**Profiles:** ${s.profiles.map((p) => `${p.name} (#${p.id})`).join(', ')}`);
+        lines.push(
+          `**Profiles:** ${s.profiles.map((p) => `${escapeMarkdownInline(p.name)} (#${p.id})`).join(', ')}`,
+        );
       }
       if (s.rootFolders && s.rootFolders.length > 0) {
         for (const f of s.rootFolders) {
           const free = f.freeSpace !== undefined ? ` — freeSpace ${f.freeSpace} bytes` : '';
-          lines.push(`**Root folder:** ${f.path}${free}`);
+          lines.push(`**Root folder:** ${escapeMarkdownInline(f.path)}${free}`);
         }
       }
     }
