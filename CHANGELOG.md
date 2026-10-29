@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.2.0](changelog/0.2.x/0.2.0.md) — 2026-10-28
+
+Publishes the seerr-guide agent skill as an MCP resource, escapes upstream titles, names and dates in content[], and moves mcp-ts-core from 0.13.13 to 0.13.18 for string and null tool-argument repair (0.13.14) and Markdown-escaped error text (0.13.16).
+
 ## [0.1.5](changelog/0.1.x/0.1.5.md) — 2026-10-07 · 🛡️ Security
 
 Binds confirmations to the caller and exact media payload, prevents automatic POST retries, and upgrades mcp-ts-core from 0.13.6 to 0.13.13 with input repair, clearer errors and current packaging.

@@ -1,6 +1,6 @@
 # seerr-mcp-server - Directory Structure
 
-Generated on: 2026-10-07 12:36:07
+Generated on: 2026-10-29 04:11:33
 
 ```text
 seerr-mcp-server/
@@ -25,6 +25,7 @@ seerr-mcp-server/
 │   └── settings.json
 ├── changelog/
 │   ├── 0.1.x/
+│   ├── 0.2.x/
 │   └── template.md
 ├── docs/
 │   └── design.md
@@ -36,6 +37,8 @@ seerr-mcp-server/
 │   ├── add-resource/
 │   │   └── SKILL.md
 │   ├── add-service/
+│   │   └── SKILL.md
+│   ├── add-skill/
 │   │   └── SKILL.md
 │   ├── add-test/
 │   │   └── SKILL.md
@@ -133,6 +136,9 @@ seerr-mcp-server/
 │   ├── prune-musl-packages.ts
 │   ├── release-github.ts
 │   └── tree.ts
+├── skills/
+│   └── seerr-guide/
+│       └── SKILL.md
 ├── src/
 │   ├── config/
 │   │   └── server-config.ts
@@ -162,6 +168,8 @@ seerr-mcp-server/
 ├── tests/
 │   ├── resources/
 │   │   └── request.resource.test.ts
+│   ├── scripts/
+│   │   └── bundle-agent-docs.test.ts
 │   ├── services/
 │   │   └── seerr/
 │   │       ├── normalizers.test.ts
@@ -190,7 +198,9 @@ seerr-mcp-server/
 ├── Dockerfile
 ├── LICENSE
 ├── manifest.json
+├── mcp.json
 ├── package.json
+├── plugin.json
 ├── README.md
 ├── server.json
 ├── tsconfig.build.json
