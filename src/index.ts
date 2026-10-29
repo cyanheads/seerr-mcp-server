@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 /**
  * @fileoverview seerr-mcp-server MCP server entry point. Wires the SeerrService in
- * setup() and registers the six tools + one resource. Identity is name + title
+ * setup() and registers the six tools + one resource, and serves the root `skills/`
+ * tree as `skill://` resources. Identity is name + title
  * only (the hyphenated machine name) — description derives from package.json.
  * The HTTP session posture is declared here rather than left to a deployment's
  * MCP_SESSION_MODE, because seerr_request_media's confirmation round is not
@@ -19,6 +20,7 @@ await createApp({
   title: 'seerr-mcp-server',
   tools: allToolDefinitions,
   resources: allResourceDefinitions,
+  skills: 'skills',
   /**
    * The guarded write gates on `ctx.requestInput`, which a 2025-era HTTP client can
    * only answer over a live session. `require: 'stateful'` turns a `stateless`

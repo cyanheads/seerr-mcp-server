@@ -1,13 +1,13 @@
 <div align="center">
   <h1>@cyanheads/seerr-mcp-server</h1>
   <p><b>Search Jellyseerr/Overseerr, check availability, and create guarded media requests via MCP. STDIO or Streamable HTTP.</b>
-  <div>6 Tools • 1 Resource</div>
+  <div>6 Tools • 1 Resource • 1 Skill</div>
   </p>
 </div>
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.1.5-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.2.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/seerr-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/seerr-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.2-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.1.5-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.4.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/seerr-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/seerr-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.4-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -23,7 +23,7 @@
 
 ## Overview
 
-Jellyseerr and Overseerr media-request workflow: search TMDB-backed titles, confirm the exact match, check availability and request state, and create a guarded request that Radarr/Sonarr act on. Jellyseerr owns permissions, quotas, routing, and status — this server never calls Radarr/Sonarr directly. Runs as a stdio process or a local Streamable HTTP server.
+Request movies and shows through Jellyseerr or Overseerr. Search titles, confirm the exact match, check availability and request status, and submit a request for Radarr or Sonarr to fulfill. Your Seerr instance keeps control of permissions, quotas, and routing.
 
 ### Tools
 
@@ -43,6 +43,12 @@ Jellyseerr and Overseerr media-request workflow: search TMDB-backed titles, conf
 | `seerr://request/{requestId}` | Read-once summary of one request — decoded status, media availability, requester, and routing. Mirrors `seerr_request_status`. |
 
 All request data is also reachable via tools — request enumeration is the job of `seerr_list_requests` (the tool-only access path).
+
+### Skills
+
+| Skill | Description |
+|:---|:---|
+| [`seerr-guide`](skills/seerr-guide/SKILL.md) | Gates for reading availability and request state (regular vs 4K tracks, what `openRequest` reports), requesting seasons and Specials, who owns server-made requests, the confirmation round, and what a refused submit means. Served as `skill://seerr-guide/SKILL.md`. |
 
 ## Capability reference
 
@@ -264,11 +270,12 @@ The Dockerfile defaults to HTTP transport, stateful session mode, and logs to `/
 
 | Directory | Purpose |
 |:---|:---|
-| `src/index.ts` | `createApp()` entry point — registers the six tools + one resource and inits the Seerr service. |
+| `src/index.ts` | `createApp()` entry point — registers the six tools + one resource, serves `skills/`, and inits the Seerr service. |
 | `src/config` | Server-specific environment variable parsing and validation with Zod. |
 | `src/mcp-server/tools` | Tool definitions (`*.tool.ts`). |
 | `src/mcp-server/resources` | Resource definitions (`*.resource.ts`). |
 | `src/services/seerr` | Jellyseerr API client, status decoders, and the PII/infra redaction normalizers. |
+| `skills/` | Published Agent Skills, served over MCP as `skill://` resources. |
 | `tests/` | Unit and integration tests mirroring `src/`. |
 
 ## Development guide
