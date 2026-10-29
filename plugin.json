@@ -1,0 +1,27 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "seerr-mcp-server",
+  "version": "0.1.5",
+  "description": "Search Jellyseerr/Overseerr, check availability, and create guarded media requests via MCP. STDIO or Streamable HTTP.",
+  "author": {
+    "name": "Casey Hand",
+    "email": "casey@caseyjhand.com",
+    "url": "https://caseyjhand.com"
+  },
+  "homepage": "https://github.com/cyanheads/seerr-mcp-server#readme",
+  "repository": "https://github.com/cyanheads/seerr-mcp-server",
+  "license": "Apache-2.0",
+  "keywords": [
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
+    "jellyseerr",
+    "overseerr",
+    "seerr",
+    "radarr",
+    "sonarr",
+    "media-requests",
+    "stdio",
+    "streamable-http"
+  ]
+}
