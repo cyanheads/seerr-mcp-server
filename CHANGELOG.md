@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.2.1](changelog/0.2.x/0.2.1.md) — 2026-11-19
+
+Typed refusals for Seerr's duplicate (409) and no-seasons (202) answers, request listing that works against Overseerr, a clear label and total for the latest request and search count, and headings that survive line breaks in upstream titles.
+
 ## [0.2.0](changelog/0.2.x/0.2.0.md) — 2026-10-28
 
 Publishes the seerr-guide agent skill as an MCP resource, escapes upstream titles, names and dates in content[], and moves mcp-ts-core from 0.13.13 to 0.13.18 for string and null tool-argument repair (0.13.14) and Markdown-escaped error text (0.13.16).
