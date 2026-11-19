@@ -176,7 +176,7 @@ z.object({
 ```
 `StatusRef` = `z.object({ raw: z.number(), label: z.string() })`, shared in `status.ts`.
 
-**Enrichment:** `totalCount` (via `ctx.enrich.total(response.totalResults)` — note the search envelope uses `totalResults`, not `pageInfo.results`), `effectiveQuery` (echo the parsed query), `truncated`/`shown`/`cap` (optional — fired only when the page yields more than `limit`), `notice` (optional, set on empty results: `No movie/TV match for "<query>". Try a different spelling or broaden mediaType to "all".`).
+**Enrichment:** `totalCount` (via `ctx.enrich.total(response.totalResults)` — note the search envelope uses `totalResults`, not `pageInfo.results`. It is TMDB's multi-search total across movies, TV shows, and people, with `mediaType` not applied; Seerr offers no movie/TV-only count, so the tool never recounts it from the page. The field description and the `content[]` total line, an `enrichmentTrailer.totalCount.render` reading `**N total** (Seerr's count across movies, TV shows, and people)`, both say what it counts; a response without `totalResults` fails the required field rather than reporting a page count), `effectiveQuery` (echo the parsed query), `truncated`/`shown`/`cap` (optional — fired only when the page yields more than `limit`), `notice` (optional, set on empty results: `No movie/TV match. Try a different spelling.`, or `No movie/TV match. Try a different spelling or broaden mediaType to "all".` when `mediaType` is `movie` or `tv`. The notice renders as live Markdown, so it carries no caller text; the query rides `effectiveQuery`, which the trailer renders as a code literal).
 
 **Errors:** No domain contract needed — empty results are a normal success (`results: []` + notice), upstream 5xx bubbles as `ServiceUnavailable`. `query` min-length handled by Zod (`ValidationError`).
 
@@ -188,7 +188,7 @@ z.object({
 
 ### 2. `seerr_get_media`
 
-**Purpose:** Confirm the exact title before a write. Wraps `GET /movie/{id}` or `GET /tv/{id}`, optionally `GET /tv/{id}/season/{n}` for episodes. Returns enough to verify the agent picked the right title and to see current availability + whether a request already exists.
+**Purpose:** Confirm the exact title before a write. Wraps `GET /movie/{id}` or `GET /tv/{id}`, optionally `GET /tv/{id}/season/{n}` for episodes. Returns enough to verify the agent picked the right title and to see current availability + the title's latest request, if any.
 
 **Endpoints:** `GET /movie/{tmdbId}` · `GET /tv/{tvId}` · `GET /tv/{tvId}/season/{seasonNumber}` (only when `seasonNumber` provided and `mediaType=tv`).
 
@@ -219,10 +219,10 @@ z.object({
     status: StatusRef.describe('Decoded availability {raw,label}.'),
     status4k: StatusRef.optional().describe('Decoded 4K availability when 4K is enabled.'),
     openRequest: z.object({
-      requestId: z.number().describe('Existing request ID — pass to seerr_request_status.'),
+      requestId: z.number().describe('ID of the latest request — pass to seerr_request_status.'),
       status: StatusRef.describe('Decoded request status {raw,label}.'),
-      is4k: z.boolean().describe('Whether the open request is for 4K.'),
-    }).optional().describe('Most recent existing request for this title, if any — avoids duplicate requests.'),
+      is4k: z.boolean().describe('Whether the latest request is for 4K.'),
+    }).optional().describe('Latest request for this title at any quality and in any state, declined and completed included; omitted when the title has none. Read its status and is4k before calling it open or a duplicate.'),
   }).describe('Seerr availability + existing-request context for this title.'),
   seasons: z.array(z.object({
     seasonNumber: z.number().describe('Season number; 0 = Specials.'),
@@ -245,36 +245,38 @@ errors: [
   { reason: 'media_not_found', code: JsonRpcErrorCode.NotFound,
     when: 'The TMDB ID does not resolve to a movie/show (Seerr returns HTTP 500 "Unable to retrieve movie.")',
     recovery: 'Call seerr_search_media to find the correct tmdbId, then retry with the exact ID and matching mediaType.' },
+  { reason: 'season_not_found', code: JsonRpcErrorCode.NotFound,
+    when: 'The seasonNumber does not resolve to a season of the show (Seerr returns HTTP 500 "Unable to retrieve season.")',
+    recovery: "Call seerr_get_media without seasonNumber to list the show's seasons, then retry with one of the listed season numbers." },
 ]
 ```
-The service maps upstream **HTTP 500 with body `Unable to retrieve movie.`** → `ctx.fail('media_not_found', …)`. Other 5xx bubble as `ServiceUnavailable`.
+The service maps upstream **HTTP 500 with body `Unable to retrieve movie.`** → `media_not_found`, and the season read's **HTTP 500 with body `Unable to retrieve season.`** → `season_not_found`. Seerr sends both when TMDB itself fails as well, so each message says the item could not be retrieved, not that it does not exist. The show is read before the season, so an unknown show reports `media_not_found`. Other 5xx bubble as `ServiceUnavailable`.
 
 **Annotations:** `{ readOnlyHint: true, openWorldHint: true }`.
 
-**Field-shape notes (live):** Movie detail includes `mediaInfo` (with `status`, `status4k`, `requests[]`); `numberOfSeasons` on TV detail is **plural** in the live API (the spec's `numberOfSeason` is wrong — verified against `/tv/1399`). `seasons[]` includes season 0 (Specials). Movies have no `seasons`. `openRequest` is derived from `mediaInfo.requests` (take the most recent), with the `User` projected and status decoded.
-
+**Field-shape notes (live):** Movie detail includes `mediaInfo` (with `status`, `status4k`, `requests[]`); `numberOfSeasons` on TV detail is **plural** in the live API (the spec's `numberOfSeason` is wrong — verified against `/tv/1399`). `seasons[]` includes season 0 (Specials). Movies have no `seasons`. `openRequest` is derived from `mediaInfo.requests` (take the most recent, at any quality and in any state), with the `User` projected and status decoded.
 ---
 
 ### 3. `seerr_list_requests`
 
 **Purpose:** Review recent requests and their lifecycle. Wraps `GET /request`. Echoes the filters the server applied and decodes every numeric status.
 
-**Endpoint:** `GET /request?take={take}&skip={skip}&filter={filter}&sort={sort}&sortDirection={sortDirection}&requestedBy={id}&mediaType={mediaType}`
+**Endpoint:** `GET /request?take={take}&skip={skip}&filter={filter}&sort={sort}&sortDirection={sortDirection}&requestedBy={id}&mediaType={mediaType}` — `sortDirection` is sent only for `asc` (every version orders newest first without it); `mediaType` is sent only for `movie` or `tv`.
 
 **Input:**
 ```ts
 z.object({
   filter: z.enum(['all','approved','available','pending','processing','unavailable','failed','deleted','completed'])
     .default('all')
-    .describe('Lifecycle filter. "pending" = awaiting approval; "processing" = downloading; "available" = ready to watch; "failed" = needs retry in Seerr.'),
+    .describe('Lifecycle filter. "pending" = awaiting approval; "processing" = downloading; "available" = ready to watch; "failed" = needs retry in Seerr. "deleted" and "completed" need Seerr, Jellyseerr 2.6+, or Overseerr 1.35+.'),
   mediaType: z.enum(['movie','tv','all']).default('all')
-    .describe('Restrict to movies, TV, or both.'),
+    .describe('Restrict to movies, TV, or both. "movie" and "tv" need Seerr or Jellyseerr 2.6+; Overseerr rejects them, so use "all" there.'),
   requestedById: z.number().int().positive().optional()
     .describe('Seerr numeric user ID to show only one requester\'s requests. Omit for all (requires manage permission on the API key, which the default key has).'),
   sort: z.enum(['added','modified']).default('added')
     .describe('Sort key: when the request was created ("added") or last changed ("modified").'),
   sortDirection: z.enum(['asc','desc']).default('desc')
-    .describe('Sort direction. Default desc shows the most recent first.'),
+    .describe('Sort direction. Default desc shows the most recent first. "asc" needs Seerr or Jellyseerr 2.2+; Overseerr always returns newest first and rejects "asc".'),
   take: z.number().int().min(1).max(100).default(20)
     .describe('Page size — max requests to return in one call.'),
   skip: z.number().int().min(0).default(0)
@@ -306,9 +308,17 @@ z.object({
 })
 ```
 
-**Enrichment:** `totalCount` (from `pageInfo.results` via `ctx.enrich.total` — live confirmed: `{ page, pages, pageSize, results }` where `results` is the total count), `truncated`/`shown`/`cap` (optional — fired when `results.length >= take` and the total exceeds what was returned), `echo` of the applied filter set (`filter=…, mediaType=…, sort=…`), `notice` on empty and on partial title hydration. `ctx.enrich.truncated` writes the same `notice` field (last-wins), so the handler composes the pagination hint and any hydration disclosure into one string rather than issuing two calls.
+**Enrichment:** `totalCount` (from `pageInfo.results` via `ctx.enrich.total` — live confirmed: `{ page, pages, pageSize, results }` where `results` is the total count), `truncated`/`shown`/`cap` (optional — fired when `results.length >= take` and the total exceeds what was returned), `appliedFilters` echoing the applied set (`filter`, `mediaType`, `sort`, `sortDirection`; the trailer reads `status=…, media=…, sort=added desc`), `notice` on empty and on partial title hydration. `ctx.enrich.truncated` writes the same `notice` field (last-wins), so the handler composes the pagination hint and any hydration disclosure into one string rather than issuing two calls.
 
-**Errors:** None declared — empty is normal; upstream 5xx bubbles.
+**Errors (typed contract):**
+```ts
+errors: [
+  { reason: 'unsupported_filter', code: JsonRpcErrorCode.InvalidParams,
+    when: 'Seerr rejected the list query with HTTP 400: the instance is a version that does not accept the requested mediaType, sortDirection, or filter value.',
+    recovery: 'Retry with mediaType "all" and the default sortDirection, keeping filter. If that is rejected too and filter was "failed", "completed", or "deleted", retry with filter "all" and pick the rows yourself: "failed" and "completed" by each row\'s requestStatus, "deleted" by its mediaStatus (mediaStatus4k on an is4k row).' },
+]
+```
+Raised by the service-layer classifier from the endpoint and HTTP status, without matching the body (`GET /request` takes no body, so its 400 is always a query the instance's version does not accept), not by a handler `ctx.fail`. Empty is normal; other upstream 5xx bubble.
 
 **Annotations:** `{ readOnlyHint: true, openWorldHint: true }`.
 
@@ -320,7 +330,7 @@ z.object({
 
 **Purpose:** The only mutation in the surface. Resolves and previews a request payload, then creates it only on explicit confirmation. "Download Mulan" = "create a Seerr request for Mulan" — never a direct Radarr/Sonarr call.
 
-**Endpoints:** `GET /movie/{id}` or `GET /tv/{id}` (resolve + duplicate check, always) → `POST /request` (only when `mode: request` and confirmed).
+**Endpoints:** `GET /movie/{id}` or `GET /tv/{id}` (resolve + latest-request read, always) → `POST /request` (only when `mode: request` and confirmed).
 
 **Input:**
 ```ts
@@ -337,7 +347,7 @@ z.object({
     z.literal('all'),
     z.array(z.number().int().min(0)).min(1),
   ]).optional()
-    .describe('TV only. "all" hands the whole series to the instance, which decides whether that includes season 0 (Specials). An explicit list (e.g. [1,2]) requests exactly those seasons, and season 0 is rejected unless the instance enables special episodes. Required for TV requests; ignored for movies.'),
+    .describe('TV only. "all" requests every numbered season (1 and up), never season 0 (Specials); list 0 explicitly to request Specials. An explicit list (e.g. [1,2]) requests those seasons, and season 0 is rejected unless the instance enables special episodes. Seerr skips seasons already requested or available at this quality. Required for TV requests; ignored for movies.'),
   serverId: z.number().int().min(0).optional()
     .describe('Override the Radarr/Sonarr server ID (from seerr_service_options). Omit to use the Seerr default — recommended.'),
   profileId: z.number().int().positive().optional()
@@ -374,10 +384,10 @@ z.object({
     languageProfileId: z.number().optional().describe('Language profile override, if any.'),
   }).describe('The exact request body that was (or would be) submitted.'),
   existingRequest: z.object({
-    requestId: z.number().describe('Existing request ID for this title, if one already exists.'),
-    status: StatusRef.describe('Decoded status of the existing request.'),
-    is4k: z.boolean().describe('Whether the existing request is 4K.'),
-  }).optional().describe('Surfaced when the title already has a request — preview warns; request still proceeds if the agent intends a distinct (e.g. 4K) request.'),
+    requestId: z.number().describe('ID of the latest request — pass to seerr_request_status.'),
+    status: StatusRef.describe('Decoded status of the latest request {raw,label}; it may be declined or completed.'),
+    is4k: z.boolean().describe('Whether the latest request is for 4K.'),
+  }).optional().describe('Latest request for this title at any quality and in any state, declined and completed included; omitted when the title has none. It is not necessarily the request that would block a submission: only a request at the submitted quality can, and Seerr reports a refusal as duplicate_request. Read its status and is4k before treating it as a duplicate.'),
   created: z.object({
     requestId: z.number().describe('New request ID — pass to seerr_request_status.'),
     requestStatus: StatusRef.describe('Decoded status of the created request (often "pending" or auto-"approved").'),
@@ -391,7 +401,7 @@ z.object({
 | # | Call | Purpose | Mode gate |
 |:--|:--|:--|:--|
 | 1 | `GET /settings/public` (cached) | Read `movie4kEnabled`/`series4kEnabled`/`partialRequestsEnabled`/`enableSpecialEpisodes` for capability + validation | always |
-| 2 | `GET /movie/{id}` or `/tv/{id}` | Resolve title/year, read `mediaInfo` for existing requests | always |
+| 2 | `GET /movie/{id}` or `/tv/{id}` | Resolve title/year, read `mediaInfo` for the latest request | always |
 | 3 | Build `payload`, validate (4K allowed? seasons valid? partial allowed?) | Local validation → typed errors before any write | always |
 | 4 | `ctx.requestInput` confirmation round | Human confirms the resolved title + payload before the POST; the handler suspends and is re-entered with the answer | `request` only |
 | 5 | `POST /request` | Create the request in one attempt, without automatic retries | `request` only |
@@ -423,14 +433,17 @@ errors: [
     when: 'the season list includes 0 (Specials) but the instance has special episodes disabled',
     recovery: 'Drop season 0 from the list, or confirm specialEpisodesEnabled via seerr_service_options first.' },
   { reason: 'duplicate_request', code: JsonRpcErrorCode.InvalidParams,
-    when: 'Seerr rejects the POST because an identical request already exists',
-    recovery: 'Check the existingRequest in this output; track it with seerr_request_status instead of re-requesting.' },
+    when: 'Seerr refuses the POST with HTTP 409 because a request for this title at the same quality already exists.',
+    recovery: 'Track the request numbered in the message (#N, also existingRequestId) with seerr_request_status instead of re-requesting; when the message names no request number, read the title\'s latest request with seerr_get_media.' },
+  { reason: 'no_seasons_available', code: JsonRpcErrorCode.InvalidParams,
+    when: 'Seerr answers the POST with HTTP 202 and creates nothing, because every requested season is already requested or available at this quality, or (seasons "all" on Seerr 3.5+) has no episodes listed yet.',
+    recovery: 'Nothing was created. Check seerr_get_media or seerr_list_requests for the request or availability that already covers those seasons; seerr_get_media also lists each season\'s episode count.' },
   { reason: 'request_cancelled', code: JsonRpcErrorCode.InvalidParams,
     when: 'the confirmation round came back declined, cancelled, or without a valid acceptance',
     recovery: 'Re-run with mode:request and confirm if you intend to submit.' },
 ]
 ```
-Validation errors (4K, seasons) are caught **locally before the POST** using the cached settings — the agent gets an actionable error without a failed write. `duplicate_request` is detected from the POST's upstream rejection (Seerr 409/500) and cross-checked against the resolved `mediaInfo.requests`.
+Validation errors (4K, seasons) are caught **locally before the POST** using the cached settings — the agent gets an actionable error without a failed write. The service classifies the POST's outcome from the endpoint and HTTP status, without matching Seerr's error body, and no Seerr error body reaches output: HTTP 409 → `duplicate_request`, HTTP 202 → `no_seasons_available` (thrown by `SeerrService.createRequest`, not a handler `ctx.fail`). The handler names the blocker, as `#N` in the message and as `existingRequestId`, by mirroring Seerr's duplicate check: for a movie, the lowest-`id` request in the resolved `mediaInfo.requests` at the submitted quality (Seerr's first row; the array arrives unordered), named only while it is pending, approved, or failed. Seerr's other 409 rule, a same-user auto-request at that quality, accounts for every TV refusal and for a movie whose first request is declined or completed; the handler doesn't attribute it, so `existingRequestId` is omitted and the message names no number. A 2xx answer without a numeric request `id` is a `SerializationError` (it carries a hint to read the title's latest request with `seerr_get_media` before submitting again), so `created` always holds a request the caller can track.
 
 **Annotations:** `{ destructiveHint: true, openWorldHint: true, idempotentHint: false }`.
 
@@ -573,7 +586,7 @@ Single service, init/accessor pattern (`getSeerrService()`), initialized in `set
 - `normalizers.ts` — raw→domain projection, including the `User`→`{id,displayName}` and path/URL redaction. The single choke point for PII/infra stripping.
 - `titles.ts` — the request→title join (`resolveTitles` for a page, `hydrateRequestTitle` for one record). Request objects carry no title, so this reads `getMovie`/`getTv` and keeps only the title string. De-duplicates by `(mediaType, tmdbId)`, caps concurrency, and makes every leg single-attempt; a failed or impossible lookup yields no title rather than an error.
 - `types.ts` — raw upstream types (hand-written from spec + live probes) and domain types.
-- `errors.ts` — the upstream-error classifier: detects HTTP 500 + body `Unable to retrieve movie.` → `media_not_found`; maps other non-OK to `ServiceUnavailable`.
+- `errors.ts` — the upstream-error classifier, keyed on the endpoint (`media`, `season`, `request`, `requestList`, `requestCreate`) and status, and no Seerr error body reaches output. Movie/TV reads: HTTP 500 or 404 + a body matching `Unable to retrieve movie|series|tv` → `media_not_found`. `GET /tv/{id}/season/{n}`: 500 + a body matching `Unable to retrieve season` → `season_not_found`. `GET /request/{id}`: 404 + a body matching `Request not found` → `request_not_found`. `GET /request`: 400 → `unsupported_filter`. `POST /request`: 409 → `duplicate_request`. Anything else non-OK maps to the framework's status-based errors (`ServiceUnavailable` for 5xx). A `POST /request` 202 (→ `no_seasons_available`) and a 2xx without a request `id` (→ `SerializationError`) are classified in `seerr-service.ts`.
 
 **Resilience:**
 
@@ -683,7 +696,7 @@ The OpenAPI spec lags the running API in several places — the design follows t
 | `MediaRequest.profileName` | present | **null at `GET /request/{id}`** — zero on live probe | declare `routing.profileName` as optional |
 | `MediaRequest.type` | (not well documented) | `"movie"` or `"tv"` — field is `type`, NOT `mediaType` | normalizer maps `request.type → mediaType` in output |
 | `/request` (list) | `pageInfo` + `results` | `{ pageInfo: { page, pages, pageSize, results }, results[], serviceErrors }` | use `pageInfo.results` for `totalCount` |
-| `/search` response | (inconsistent) | `{ page, totalPages, totalResults, results[] }` — `totalResults` is the count | use `response.totalResults` for `totalCount` |
+| `/search` response | (inconsistent) | `{ page, totalPages, totalResults, results[] }` — `totalResults` is TMDB's multi-search count across movies, TV shows, and people | use `response.totalResults` for `totalCount`, disclosed as that every-type count, never recounted from the page |
 | `/search` result `mediaInfo` | includes `requests[]` | **no `requests[]`** in search results — only in `/movie/{id}` and `/tv/{id}` detail responses | `seerr_search_media` can only surface availability status, not open-request data |
 | `/service/radarr/{id}` | `profiles` = single `ServiceProfile` | `{ server, profiles[], rootFolders[], tags }` — `profiles` is an **array**, `rootFolders[]` undocumented | array + folders |
 | `/service/radarr` (list) | includes `activeProfileName` (required) | omits `activeProfileName`; includes `activeDirectory` (a path) | profile names need the detail call; redact `activeDirectory` |

@@ -9,6 +9,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
+import { escapeMarkdownHeading } from '@/mcp-server/tools/escape-markdown-heading.js';
 import { redactAvailability } from '@/services/seerr/normalizers.js';
 import { getSeerrService } from '@/services/seerr/seerr-service.js';
 import { StatusRef, statusText } from '@/services/seerr/status.js';
@@ -109,7 +110,9 @@ export const searchMediaTool = tool('seerr_search_media', {
     effectiveQuery: z.string().describe('The query as the server parsed it.'),
     totalCount: z
       .number()
-      .describe('Total results Seerr reported for the query before this page limit.'),
+      .describe(
+        "Seerr's total for the query across every result type — movies, TV shows, and people — with mediaType not applied, so it can exceed the movie/TV matches this tool returns.",
+      ),
     truncated: z
       .boolean()
       .optional()
@@ -117,6 +120,11 @@ export const searchMediaTool = tool('seerr_search_media', {
     shown: z.number().optional().describe('Number of results returned after the limit.'),
     cap: z.number().optional().describe('The limit that was applied.'),
     notice: z.string().optional().describe('Guidance when nothing matched.'),
+  },
+  enrichmentTrailer: {
+    totalCount: {
+      render: (total) => `**${total} total** (Seerr's count across movies, TV shows, and people)`,
+    },
   },
 
   async handler(input, ctx) {
@@ -160,13 +168,16 @@ export const searchMediaTool = tool('seerr_search_media', {
     });
 
     ctx.enrich.echo(input.query);
-    ctx.enrich.total(response.totalResults ?? matches.length);
+    // Never a page recount: absent, the required totalCount fails the enrichment parse loudly.
+    if (response.totalResults !== undefined) ctx.enrich.total(response.totalResults);
     if (matches.length > input.limit) {
       ctx.enrich.truncated({ shown: results.length, cap: input.limit });
     }
     if (results.length === 0) {
       ctx.enrich.notice(
-        `No movie/TV match for "${input.query}". Try a different spelling or broaden mediaType to "all".`,
+        input.mediaType === 'all'
+          ? 'No movie/TV match. Try a different spelling.'
+          : 'No movie/TV match. Try a different spelling or broaden mediaType to "all".',
       );
     }
 
@@ -185,7 +196,7 @@ export const searchMediaTool = tool('seerr_search_media', {
     const lines: string[] = [];
     for (const r of result.results) {
       const yearPart = r.year !== undefined ? ` (${r.year})` : '';
-      lines.push(`## ${escapeMarkdownInline(r.title)}${yearPart} — ${r.mediaType}`);
+      lines.push(`## ${escapeMarkdownHeading(r.title)}${yearPart} — ${r.mediaType}`);
       const facts = [`**TMDB ID:** ${r.tmdbId}`];
       if (r.voteAverage !== undefined) facts.push(`**Rating:** ${r.voteAverage.toFixed(1)}/10`);
       facts.push(`**Tracked by Seerr:** ${r.tracked ? 'Yes' : 'No'}`);

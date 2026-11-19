@@ -25,8 +25,9 @@ import { isDeepStrictEqual } from 'node:util';
 import { inputRequired, tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
-import { redactOpenRequest } from '@/services/seerr/normalizers.js';
-import { getSeerrService } from '@/services/seerr/seerr-service.js';
+import { escapeMarkdownHeading } from '@/mcp-server/tools/escape-markdown-heading.js';
+import { duplicateBlockerId, redactLatestRequest } from '@/services/seerr/normalizers.js';
+import { getSeerrService, type RawMediaRequestDetail } from '@/services/seerr/seerr-service.js';
 import {
   decodeMediaStatus,
   decodeRequestStatus,
@@ -103,7 +104,7 @@ export const requestMediaTool = tool('seerr_request_media', {
       ])
       .optional()
       .describe(
-        'TV only. "all" hands the whole series to the instance, which decides whether that includes season 0 (Specials). An explicit list (e.g. [1,2]) requests exactly those seasons, and season 0 is rejected unless the instance enables special episodes. Required for TV requests; ignored for movies.',
+        'TV only. "all" requests every numbered season (1 and up), never season 0 (Specials); list 0 explicitly to request Specials. An explicit list (e.g. [1,2]) requests those seasons, and season 0 is rejected unless the instance enables special episodes. Seerr skips seasons already requested or available at this quality. Required for TV requests; ignored for movies.',
       ),
     serverId: z
       .number()
@@ -176,15 +177,15 @@ export const requestMediaTool = tool('seerr_request_media', {
       .describe('The exact request body that was (or would be) submitted.'),
     existingRequest: z
       .object({
-        requestId: z
-          .number()
-          .describe('Existing request ID for this title, if one already exists.'),
-        status: StatusRef.describe('Decoded status of the existing request.'),
-        is4k: z.boolean().describe('Whether the existing request is 4K.'),
+        requestId: z.number().describe('ID of the latest request — pass to seerr_request_status.'),
+        status: StatusRef.describe(
+          'Decoded status of the latest request {raw,label}; it may be declined or completed.',
+        ),
+        is4k: z.boolean().describe('Whether the latest request is for 4K.'),
       })
       .optional()
       .describe(
-        'Surfaced when the title already has a request — preview warns; request still proceeds if the agent intends a distinct (e.g. 4K) request.',
+        'Latest request for this title at any quality and in any state, declined and completed included; omitted when the title has none. It is not necessarily the request that would block a submission: only a request at the submitted quality can, and Seerr reports a refusal as duplicate_request. Read its status and is4k before treating it as a duplicate.',
       ),
     created: z
       .object({
@@ -236,9 +237,18 @@ export const requestMediaTool = tool('seerr_request_media', {
     {
       reason: 'duplicate_request',
       code: JsonRpcErrorCode.InvalidParams,
-      when: 'Seerr rejects the POST because an identical request already exists.',
+      when: 'Seerr refuses the POST with HTTP 409 because a request for this title at the same quality already exists.',
       recovery:
-        'Check the existingRequest in this output; track it with seerr_request_status instead of re-requesting.',
+        "Track the request numbered in the message (#N, also existingRequestId) with seerr_request_status instead of re-requesting; when the message names no request number, read the title's latest request with seerr_get_media.",
+    },
+    {
+      reason: 'no_seasons_available',
+      code: JsonRpcErrorCode.InvalidParams,
+      when: 'Seerr answers the POST with HTTP 202 and creates nothing, because every requested season is already requested or available at this quality, or (seasons "all" on Seerr 3.5+) has no episodes listed yet.',
+      recovery:
+        "Nothing was created. Check seerr_get_media or seerr_list_requests for the request or availability that already covers those seasons; seerr_get_media also lists each season's episode count.",
+      /** Raised by `SeerrService.createRequest`, not by a handler `ctx.fail`. */
+      thrownBy: 'service',
     },
     {
       reason: 'request_cancelled',
@@ -285,11 +295,13 @@ export const requestMediaTool = tool('seerr_request_media', {
       year = yearOf(tv.firstAirDate);
       media = tv.mediaInfo;
     }
-    const existingRequest = redactOpenRequest(media);
+    const existingRequest = redactLatestRequest(media);
 
     // Step 3 — local validation BEFORE any write (actionable typed errors, no failed POST).
     if (input.mediaType === 'tv' && input.seasons === undefined) {
-      throw ctx.fail('seasons_required', undefined, { ...ctx.recoveryFor('seasons_required') });
+      throw ctx.fail('seasons_required', 'A TV request needs seasons, and none were given.', {
+        ...ctx.recoveryFor('seasons_required'),
+      });
     }
     if (input.is4k && !is4kEnabled) {
       throw ctx.fail(
@@ -307,9 +319,11 @@ export const requestMediaTool = tool('seerr_request_media', {
     const seasonList =
       input.mediaType === 'tv' && Array.isArray(input.seasons) ? input.seasons : undefined;
     if (seasonList && !partialRequestsEnabled) {
-      throw ctx.fail('partial_requests_disabled', undefined, {
-        ...ctx.recoveryFor('partial_requests_disabled'),
-      });
+      throw ctx.fail(
+        'partial_requests_disabled',
+        'This instance does not allow requests for individual seasons, only for the whole series.',
+        { ...ctx.recoveryFor('partial_requests_disabled') },
+      );
     }
     if (seasonList?.includes(0) && settings.enableSpecialEpisodes !== true) {
       throw ctx.fail(
@@ -383,37 +397,39 @@ export const requestMediaTool = tool('seerr_request_media', {
       });
     }
 
-    // Layer 1+3: preview default and the confirmation round both passed.
-    let created: {
-      requestId: number;
-      requestStatus: ReturnType<typeof decodeRequestStatus>;
-      mediaStatus?: ReturnType<typeof decodeMediaStatus>;
-    };
+    /**
+     * Layer 1+3: preview default and the confirmation round both passed. The
+     * service refuses a 202 (no_seasons_available) and any answer without a request
+     * ID, so `result` is always a created request. A 409 carries no request ID, so
+     * the blocker is named from this call's own pre-POST read by Seerr's own rule
+     * (`duplicateBlockerId`), and only when that rule points at one request.
+     */
+    let result: RawMediaRequestDetail;
     try {
-      const result = await seerr.createRequest(payload, ctx);
-      const mediaStatus =
-        typeof result.media?.status === 'number'
-          ? decodeMediaStatus(result.media.status)
-          : undefined;
-      created = {
-        requestId: result.id,
-        requestStatus: decodeRequestStatus(result.status ?? 1),
-        ...(mediaStatus ? { mediaStatus } : {}),
-      };
+      result = await seerr.createRequest(payload, ctx);
     } catch (err) {
-      // Cross-check a rejected POST against the resolved existing request → duplicate.
-      if (existingRequest && isDuplicateRejection(err)) {
-        throw ctx.fail(
-          'duplicate_request',
-          'Seerr rejected the request as a duplicate of an existing one.',
-          {
-            existingRequestId: existingRequest.requestId,
-            ...ctx.recoveryFor('duplicate_request'),
-          },
-        );
-      }
-      throw err;
+      if (!isDuplicateRejection(err)) throw err;
+      const blockingId = duplicateBlockerId(media, input.mediaType, input.is4k);
+      const quality = input.is4k ? '4K' : 'non-4K';
+      throw ctx.fail(
+        'duplicate_request',
+        blockingId === undefined
+          ? `Seerr refused the request: a ${quality} request for this title already exists.`
+          : `Seerr refused the request: ${quality} request #${blockingId} for this title already exists.`,
+        {
+          ...(blockingId === undefined ? {} : { existingRequestId: blockingId }),
+          ...ctx.recoveryFor('duplicate_request'),
+        },
+        { cause: err },
+      );
     }
+    const mediaStatus =
+      typeof result.media?.status === 'number' ? decodeMediaStatus(result.media.status) : undefined;
+    const created = {
+      requestId: result.id,
+      requestStatus: decodeRequestStatus(result.status ?? 1),
+      ...(mediaStatus ? { mediaStatus } : {}),
+    };
 
     ctx.log.notice('Seerr request created', {
       tmdbId: input.tmdbId,
@@ -428,7 +444,7 @@ export const requestMediaTool = tool('seerr_request_media', {
     const r = result.resolved;
     const yearPart = r.year !== undefined ? ` (${r.year})` : '';
     const verb = result.mode === 'preview' ? 'Preview' : 'Request submitted';
-    lines.push(`# ${verb}: ${escapeMarkdownInline(r.title)}${yearPart} — ${r.mediaType}`);
+    lines.push(`# ${verb}: ${escapeMarkdownHeading(r.title)}${yearPart} — ${r.mediaType}`);
     lines.push(`**TMDB ID:** ${r.tmdbId}`);
     lines.push(
       `**Capability:** 4K ${result.capability.is4kEnabled ? 'enabled' : 'disabled'} | partial requests ${result.capability.partialRequestsEnabled ? 'enabled' : 'disabled'}`,
@@ -448,7 +464,7 @@ export const requestMediaTool = tool('seerr_request_media', {
 
     if (result.existingRequest) {
       lines.push(
-        `**Existing request:** #${result.existingRequest.requestId} — status ${statusText(result.existingRequest.status)} | 4K: ${result.existingRequest.is4k ? 'Yes' : 'No'} — a request for this title already exists.`,
+        `**Latest request:** #${result.existingRequest.requestId} — status ${statusText(result.existingRequest.status)} | 4K: ${result.existingRequest.is4k ? 'Yes' : 'No'} — read its status and quality before treating this as a duplicate.`,
       );
     }
     if (result.mode === 'preview') {
@@ -500,10 +516,10 @@ function buildPayload(input: {
   };
 }
 
-/** A Seerr POST rejection that signals an already-existing request (409, or a 500 with a duplicate message). */
+/** The service's classification of a POST refused with HTTP 409 (see `services/seerr/errors.ts`). */
 function isDuplicateRejection(err: unknown): boolean {
-  if (!(err instanceof McpError)) return false;
-  const status = (err.data as { httpStatus?: number } | undefined)?.httpStatus;
-  if (status === 409) return true;
-  return /already exists|duplicate|existing request/i.test(err.message);
+  return (
+    err instanceof McpError &&
+    (err.data as { reason?: unknown } | undefined)?.reason === 'duplicate_request'
+  );
 }

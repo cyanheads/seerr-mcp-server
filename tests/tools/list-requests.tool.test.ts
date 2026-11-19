@@ -7,14 +7,50 @@
  * @module tests/tools/list-requests.tool.test
  */
 
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { SeerrService } from '@/services/seerr/seerr-service.js';
+import { readHeadings } from '../helpers/commonmark.js';
 
 const service = { listRequests: vi.fn(), getMovie: vi.fn(), getTv: vi.fn() };
 
-vi.mock('@/services/seerr/seerr-service.js', () => ({ getSeerrService: () => service }));
+vi.mock('@/config/server-config.js', () => ({
+  getServerConfig: () => ({
+    baseUrl: 'http://seerr.test:5055',
+    apiKey: 'TEST-API-KEY',
+    requestTimeoutMs: 15000,
+  }),
+}));
 
+/**
+ * The stub serves every suite but one: the upstream-status case sets `live` to a
+ * real SeerrService over a mocked `fetch`, so Seerr's status reaches the tool
+ * through the service's own classification.
+ */
+let live: SeerrService | undefined;
+
+vi.mock('@/services/seerr/seerr-service.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/services/seerr/seerr-service.js')>()),
+  getSeerrService: () => live ?? service,
+}));
+
+const seerrModule = await import('@/services/seerr/seerr-service.js');
 const { listRequestsTool } = await import('@/mcp-server/tools/definitions/list-requests.tool.js');
+
+/**
+ * The first retry keeps `filter`, since an instance that rejects `mediaType` can
+ * still accept the filter value. Seerr selects "failed" and "completed" on the
+ * request status but "deleted" on the media status, so each fallback names the
+ * field that carries its value.
+ */
+const UNSUPPORTED_FILTER_RECOVERY =
+  'Retry with mediaType "all" and the default sortDirection, keeping filter. If that is rejected too and filter was "failed", "completed", or "deleted", retry with filter "all" and pick the rows yourself: "failed" and "completed" by each row\'s requestStatus, "deleted" by its mediaStatus (mediaStatus4k on an is4k row).';
+
+/** Every `content[]` text block of a contract result, joined in order. */
+function contentText(result: Awaited<ReturnType<typeof runToolContract>>): string {
+  return (result.content as Array<{ text: string }>).map((block) => block.text).join('\n');
+}
 
 describe('seerr_list_requests', () => {
   beforeEach(() => vi.clearAllMocks());
@@ -40,7 +76,7 @@ describe('seerr_list_requests', () => {
         },
       ],
     });
-    const ctx = createMockContext({ tenantId: 'test' });
+    const ctx = createMockContext({ tenantId: 'test', errors: listRequestsTool.errors });
     const result = await listRequestsTool.handler(listRequestsTool.input.parse({}), ctx);
 
     expect(result.requests[0]).toMatchObject({
@@ -78,7 +114,7 @@ describe('seerr_list_requests', () => {
         },
       ],
     });
-    const ctx = createMockContext({ tenantId: 'test' });
+    const ctx = createMockContext({ tenantId: 'test', errors: listRequestsTool.errors });
     const result = await listRequestsTool.handler(listRequestsTool.input.parse({}), ctx);
 
     expect(result.requests[0]).toMatchObject({
@@ -92,7 +128,7 @@ describe('seerr_list_requests', () => {
 
   it('emits a notice when no requests match', async () => {
     service.listRequests.mockResolvedValue({ pageInfo: { results: 0 }, results: [] });
-    const ctx = createMockContext({ tenantId: 'test' });
+    const ctx = createMockContext({ tenantId: 'test', errors: listRequestsTool.errors });
     const result = await listRequestsTool.handler(
       listRequestsTool.input.parse({ filter: 'failed' }),
       ctx,
@@ -123,7 +159,7 @@ describe('seerr_list_requests', () => {
       pageInfo: { results: 2 },
       results: [requestRow(47, 'movie', 299534), requestRow(49, 'tv', 1399)],
     });
-    const ctx = createMockContext({ tenantId: 'test' });
+    const ctx = createMockContext({ tenantId: 'test', errors: listRequestsTool.errors });
     const result = await listRequestsTool.handler(listRequestsTool.input.parse({}), ctx);
 
     expect(service.getMovie).not.toHaveBeenCalled();
@@ -141,7 +177,7 @@ describe('seerr_list_requests', () => {
     });
     service.getMovie.mockResolvedValue({ id: 299534, title: 'Avengers: Endgame' });
     service.getTv.mockResolvedValue({ id: 1399, name: 'Game of Thrones' });
-    const ctx = createMockContext({ tenantId: 'test' });
+    const ctx = createMockContext({ tenantId: 'test', errors: listRequestsTool.errors });
     const result = await listRequestsTool.handler(
       listRequestsTool.input.parse({ includeTitles: true }),
       ctx,
@@ -162,7 +198,7 @@ describe('seerr_list_requests', () => {
       results: [requestRow(47, 'movie', 299534), requestRow(48, 'movie', 299534)],
     });
     service.getMovie.mockResolvedValue({ id: 299534, title: 'Avengers: Endgame' });
-    const ctx = createMockContext({ tenantId: 'test' });
+    const ctx = createMockContext({ tenantId: 'test', errors: listRequestsTool.errors });
     const result = await listRequestsTool.handler(
       listRequestsTool.input.parse({ includeTitles: true }),
       ctx,
@@ -178,7 +214,7 @@ describe('seerr_list_requests', () => {
       results: [requestRow(47, 'movie', 299534), requestRow(52, 'movie', null)],
     });
     service.getMovie.mockResolvedValue({ id: 299534, title: 'Avengers: Endgame' });
-    const ctx = createMockContext({ tenantId: 'test' });
+    const ctx = createMockContext({ tenantId: 'test', errors: listRequestsTool.errors });
     const result = await listRequestsTool.handler(
       listRequestsTool.input.parse({ includeTitles: true }),
       ctx,
@@ -204,7 +240,7 @@ describe('seerr_list_requests', () => {
       if (tmdbId === 404404) throw new Error('Unable to retrieve movie.');
       return { id: tmdbId, title: 'Avengers: Endgame' };
     });
-    const ctx = createMockContext({ tenantId: 'test' });
+    const ctx = createMockContext({ tenantId: 'test', errors: listRequestsTool.errors });
     const result = await listRequestsTool.handler(
       listRequestsTool.input.parse({ includeTitles: true }),
       ctx,
@@ -227,7 +263,7 @@ describe('seerr_list_requests', () => {
       results: [requestRow(47, 'movie', 299534), requestRow(55, 'movie', undefined)],
     });
     service.getMovie.mockResolvedValue({ id: 299534, title: 'Avengers: Endgame' });
-    const ctx = createMockContext({ tenantId: 'test' });
+    const ctx = createMockContext({ tenantId: 'test', errors: listRequestsTool.errors });
     const result = await listRequestsTool.handler(
       listRequestsTool.input.parse({ includeTitles: true }),
       ctx,
@@ -251,7 +287,7 @@ describe('seerr_list_requests', () => {
       results: [requestRow(47, 'movie', 299534), requestRow(52, 'movie', null)],
     });
     service.getMovie.mockResolvedValue({ id: 299534, title: 'Avengers: Endgame' });
-    const ctx = createMockContext({ tenantId: 'test' });
+    const ctx = createMockContext({ tenantId: 'test', errors: listRequestsTool.errors });
     await listRequestsTool.handler(
       listRequestsTool.input.parse({ take: 2, includeTitles: true }),
       ctx,
@@ -278,7 +314,7 @@ describe('seerr_list_requests', () => {
       if (tmdbId === 404404) throw new Error('Unable to retrieve movie.');
       return { id: tmdbId, title: 'Avengers: Endgame' };
     });
-    const ctx = createMockContext({ tenantId: 'test' });
+    const ctx = createMockContext({ tenantId: 'test', errors: listRequestsTool.errors });
     const result = await listRequestsTool.handler(
       listRequestsTool.input.parse({ take: 3, includeTitles: true }),
       ctx,
@@ -318,6 +354,26 @@ describe('seerr_list_requests', () => {
     expect(text).toContain('mediauser');
   });
 
+  it('keeps a hydrated title holding a line break in one heading', () => {
+    const blocks = listRequestsTool.format!({
+      requests: [
+        {
+          requestId: 45,
+          mediaType: 'movie',
+          title: 'Line\nBreak',
+          tmdbId: 1275779,
+          requestStatus: { raw: 2, label: 'approved' },
+          is4k: false,
+          requestedBy: { id: 1, displayName: 'mediauser' },
+          createdAt: '2026-06-08T10:50:48.000Z',
+        },
+      ],
+    });
+    expect(readHeadings((blocks[0] as { text: string }).text)).toEqual([
+      'Request #45 — Line\nBreak (movie, 4K=false)',
+    ]);
+  });
+
   it('escapes the upstream createdAt string', () => {
     const blocks = listRequestsTool.format!({
       requests: [
@@ -334,5 +390,128 @@ describe('seerr_list_requests', () => {
     });
     const text = (blocks[0] as { text: string }).text;
     expect(text).toContain('**Created:** 2026 \\*x\\*');
+  });
+});
+
+describe('seerr_list_requests — sort direction and older instances', () => {
+  beforeEach(() => vi.clearAllMocks());
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    live = undefined;
+  });
+
+  /** The service decides what reaches the wire; the tool hands it the caller's choice as given. */
+  it.each([
+    [{}, 'desc'],
+    [{ sortDirection: 'asc' }, 'asc'],
+  ])('passes sortDirection %j to the service as %s', async (args, direction) => {
+    service.listRequests.mockResolvedValue({ pageInfo: { results: 0 }, results: [] });
+    await listRequestsTool.handler(
+      listRequestsTool.input.parse(args),
+      createMockContext({ tenantId: 'test', errors: listRequestsTool.errors }),
+    );
+    expect(service.listRequests).toHaveBeenCalledWith(
+      expect.objectContaining({ sortDirection: direction }),
+      expect.anything(),
+    );
+  });
+
+  /**
+   * The default `desc` never reaches the wire, yet every upstream orders newest
+   * first without it — so the echo reports the direction the caller got.
+   */
+  it('echoes the applied sort direction on both surfaces', async () => {
+    service.listRequests.mockResolvedValue({ pageInfo: { results: 0 }, results: [] });
+    const ctx = createMockContext({ tenantId: 'test', errors: listRequestsTool.errors });
+    await listRequestsTool.handler(listRequestsTool.input.parse({}), ctx);
+    expect(getEnrichment(ctx).appliedFilters).toEqual({
+      filter: 'all',
+      mediaType: 'all',
+      sort: 'added',
+      sortDirection: 'desc',
+    });
+
+    const result = await runToolContract(listRequestsTool, { sortDirection: 'asc' });
+    expect(result.structuredContent).toMatchObject({
+      appliedFilters: { sortDirection: 'asc' },
+    });
+    expect(JSON.stringify(result.content)).toContain(
+      '**Filters:** status=all, media=all, sort=added asc',
+    );
+  });
+
+  /** Each echoed field is set off its default, so none can pass as a hard-coded default. */
+  it('echoes non-default filter, mediaType, sort, and sortDirection on both surfaces', async () => {
+    service.listRequests.mockResolvedValue({ pageInfo: { results: 0 }, results: [] });
+    const result = await runToolContract(listRequestsTool, {
+      filter: 'pending',
+      mediaType: 'tv',
+      sort: 'modified',
+      sortDirection: 'asc',
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect((result.structuredContent as { appliedFilters: unknown }).appliedFilters).toEqual({
+      filter: 'pending',
+      mediaType: 'tv',
+      sort: 'modified',
+      sortDirection: 'asc',
+    });
+    expect(contentText(result)).toContain(
+      '**Filters:** status=pending, media=tv, sort=modified asc',
+    );
+  });
+
+  it('names the default desc direction in the content[] filters line', async () => {
+    service.listRequests.mockResolvedValue({ pageInfo: { results: 0 }, results: [] });
+    const result = await runToolContract(listRequestsTool, {});
+
+    expect(result.isError).toBeFalsy();
+    expect(contentText(result)).toContain('**Filters:** status=all, media=all, sort=added desc');
+  });
+
+  it('maps a 400 from Seerr to unsupported_filter with recovery on both result surfaces', async () => {
+    const fetchMock = vi.fn<typeof fetch>(async () =>
+      Response.json(
+        {
+          message: "Unknown query parameter 'mediaType'",
+          errors: [{ path: '.query.mediaType', message: "Unknown query parameter 'mediaType'" }],
+        },
+        { status: 400 },
+      ),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    live = new seerrModule.SeerrService();
+
+    const result = await runToolContract(listRequestsTool, { mediaType: 'movie' });
+
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        code: JsonRpcErrorCode.InvalidParams,
+        data: { reason: 'unsupported_filter', retryable: false },
+      },
+    });
+    const hint = (result.structuredContent as { error: { data: { recovery: { hint: string } } } })
+      .error.data.recovery.hint;
+    expect(hint).toBe(UNSUPPORTED_FILTER_RECOVERY);
+    expect(contentText(result)).toContain(`Recovery: ${UNSUPPORTED_FILTER_RECOVERY}`);
+    expect(JSON.stringify(result)).not.toContain('Unknown query parameter');
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it('states which upstream versions accept asc, movie/tv, and the newer filters', () => {
+    const { shape } = listRequestsTool.input;
+    expect(shape.sortDirection.description).toMatch(/Jellyseerr 2\.2\+.*Overseerr/);
+    expect(shape.mediaType.description).toMatch(/Jellyseerr 2\.6\+.*Overseerr/);
+    expect(shape.filter.description).toMatch(/Overseerr 1\.35\+/);
+    expect(listRequestsTool.errors).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          reason: 'unsupported_filter',
+          code: JsonRpcErrorCode.InvalidParams,
+        }),
+      ]),
+    );
   });
 });

@@ -9,15 +9,21 @@
  * @module tests/tools/request-media.tool.test
  */
 
-import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, type McpError } from '@cyanheads/mcp-ts-core/errors';
 import {
   createMockContext,
   expectInputRequired,
   runToolContract,
 } from '@cyanheads/mcp-ts-core/testing';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { RawMediaRequestDetail } from '@/services/seerr/seerr-service.js';
-import type { RawMovieDetail, RawPublicSettings, RawTvDetail } from '@/services/seerr/types.js';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { RawMediaRequestDetail, SeerrService } from '@/services/seerr/seerr-service.js';
+import type {
+  RawMediaRequest,
+  RawMovieDetail,
+  RawPublicSettings,
+  RawTvDetail,
+} from '@/services/seerr/types.js';
+import { readHeadings } from '../helpers/commonmark.js';
 
 const settings: RawPublicSettings = {
   movie4kEnabled: true,
@@ -47,22 +53,51 @@ const service = {
   createRequest: vi.fn(async (): Promise<RawMediaRequestDetail> => createdRequest),
 };
 
-vi.mock('@/services/seerr/seerr-service.js', () => ({
-  getSeerrService: () => service,
+vi.mock('@/config/server-config.js', () => ({
+  getServerConfig: () => ({
+    baseUrl: 'http://seerr.test:5055',
+    apiKey: 'TEST-API-KEY',
+    requestTimeoutMs: 15000,
+  }),
 }));
 
+/**
+ * Most suites drive the handler against the `service` stub. The cases about how
+ * Seerr answers the POST set `live` to a real SeerrService over a mocked `fetch`,
+ * so the upstream status travels the service's own classification into the handler.
+ */
+let live: SeerrService | undefined;
+
+vi.mock('@/services/seerr/seerr-service.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/services/seerr/seerr-service.js')>()),
+  getSeerrService: () => live ?? service,
+}));
+
+const seerrModule = await import('@/services/seerr/seerr-service.js');
 const { requestMediaTool } = await import('@/mcp-server/tools/definitions/request-media.tool.js');
 
-/** The `mode: request` arm, parsed through the tool's own input schema. */
-const requestMovieInput = () =>
-  requestMediaTool.input.parse({ mediaType: 'movie', tmdbId: 1275779, mode: 'request' });
+/** The `mode: request` arm at the given quality, parsed through the tool's own input schema. */
+const requestMovieInput = (is4k = false) =>
+  requestMediaTool.input.parse({ mediaType: 'movie', tmdbId: 1275779, mode: 'request', is4k });
+
+/** A TV `mode: request` call for season 1. */
+const requestTvInput = () =>
+  requestMediaTool.input.parse({ mediaType: 'tv', tmdbId: 1399, mode: 'request', seasons: [1] });
+
+/** The error a handler call rejects with; fails the test when the call succeeds. */
+const rejectionOf = async (run: () => unknown): Promise<McpError> => {
+  try {
+    await run();
+  } catch (error) {
+    return error as McpError;
+  }
+  throw new Error('Expected the handler to reject.');
+};
 
 /** Seeds the second round with whatever the client sent back for the confirmation key. */
-const roundTwo = async (response: unknown) => {
+const roundTwo = async (response: unknown, input = requestMovieInput()) => {
   const first = createMockContext({ tenantId: 'test', errors: requestMediaTool.errors });
-  const asked = await expectInputRequired(() =>
-    requestMediaTool.handler(requestMovieInput(), first),
-  );
+  const asked = await expectInputRequired(() => requestMediaTool.handler(input, first));
   const ctx = createMockContext({
     tenantId: 'test',
     errors: requestMediaTool.errors,
@@ -482,28 +517,379 @@ describe('seerr_request_media — local validation before any write', () => {
     const result = await requestMediaTool.handler(input, ctx);
     expect(result.payload.seasons).toBe('all');
   });
+
+  /** Without its own message, `ctx.fail` falls back to the contract's lowercase `when` clause. */
+  it.each([
+    ['seasons_required', {}, {}, 'A TV request needs seasons, and none were given.'],
+    [
+      'partial_requests_disabled',
+      { seasons: [1, 2] },
+      { partialRequestsEnabled: false },
+      'This instance does not allow requests for individual seasons, only for the whole series.',
+    ],
+  ])(
+    '%s carries its own sentence-case message, not the contract when text',
+    async (reason, args, patch, message) => {
+      service.getPublicSettings.mockResolvedValue({ ...settings, ...patch });
+      const ctx = createMockContext({ tenantId: 'test', errors: requestMediaTool.errors });
+      const input = requestMediaTool.input.parse({
+        mediaType: 'tv',
+        tmdbId: 1399,
+        mode: 'request',
+        ...args,
+      });
+      const error = await rejectionOf(() => requestMediaTool.handler(input, ctx));
+
+      expect(error.data).toMatchObject({ reason });
+      expect(error.message).toBe(message);
+      expect(error.message).not.toBe(
+        requestMediaTool.errors?.find((e) => e.reason === reason)?.when,
+      );
+      expect(service.createRequest).not.toHaveBeenCalled();
+    },
+  );
+
+  it('describes seasons "all" as never including Specials and existingRequest as the latest request', () => {
+    const seasons = requestMediaTool.input.shape.seasons.description ?? '';
+    expect(seasons).not.toMatch(/decides/);
+    expect(seasons).toContain('never season 0');
+    expect(requestMediaTool.output.shape.existingRequest.description).toMatch(
+      /^Latest request for this title/,
+    );
+  });
 });
 
-describe('seerr_request_media — duplicate detection', () => {
+/** A JSON `Response`, the shape every Seerr endpoint answers with. */
+const json = (status: number, body: unknown) =>
+  new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
+
+/**
+ * Stand up a fake Seerr behind a real SeerrService: settings and the movie and show
+ * detail reads answer with fixtures, and the POST answers however the test says.
+ * Any other request fails the test.
+ */
+function fakeSeerr(
+  post: () => Response,
+  detail: { movie?: RawMovieDetail; tv?: RawTvDetail } = {},
+) {
+  const fetchMock = vi.fn<typeof fetch>(async (input, init) => {
+    const { pathname } = new URL(String(input));
+    if (init?.method === 'POST' && pathname === '/api/v1/request') return post();
+    if (pathname === '/api/v1/settings/public') return json(200, settings);
+    if (pathname === `/api/v1/movie/${movie.id}`) return json(200, detail.movie ?? movie);
+    if (pathname === `/api/v1/tv/${tv.id}`) return json(200, detail.tv ?? tv);
+    throw new Error(`Unrouted ${init?.method ?? 'GET'} ${pathname}`);
+  });
+  vi.stubGlobal('fetch', fetchMock);
+  live = new seerrModule.SeerrService();
+  return () => fetchMock.mock.calls.filter(([, init]) => init?.method === 'POST').length;
+}
+
+/** The movie with two requests: #45 approved non-4K (January), #46 completed 4K (March). */
+const movieWithRequests = (requests: RawMediaRequest[] = []): RawMovieDetail => ({
+  ...movie,
+  mediaInfo: {
+    status: 5,
+    requests: [
+      { id: 45, status: 2, is4k: false, createdAt: '2026-01-01T00:00:00.000Z' },
+      { id: 46, status: 5, is4k: true, createdAt: '2026-03-01T00:00:00.000Z' },
+      ...requests,
+    ],
+  },
+});
+
+/** The movie carrying exactly these requests and nothing else. */
+const movieWith = (requests: RawMediaRequest[]): RawMovieDetail => ({
+  ...movie,
+  mediaInfo: { status: 3, requests },
+});
+
+/** The show with an approved non-4K request (#70) — a row a TV 409 must not be pinned on. */
+const tvWithRequests: RawTvDetail = {
+  ...tv,
+  mediaInfo: {
+    status: 4,
+    requests: [{ id: 70, status: 2, is4k: false, createdAt: '2026-02-01T00:00:00.000Z' }],
+  },
+};
+
+const conflict = () => json(409, { message: 'Request for this media already exists.' });
+const accepted = { action: 'accept', content: { confirmed: true } };
+
+/** Run the handler through the production-shaped contract runner on a prepared context. */
+const contract = (input: ReturnType<typeof requestMovieInput>, ctx: unknown) =>
+  runToolContract(
+    {
+      ...requestMediaTool,
+      handler: (args) =>
+        requestMediaTool.handler(
+          requestMediaTool.input.parse(args),
+          ctx as Parameters<typeof requestMediaTool.handler>[1],
+        ),
+    },
+    input,
+  );
+
+describe('seerr_request_media — how Seerr answers the POST', () => {
+  beforeEach(() => vi.clearAllMocks());
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    live = undefined;
+  });
+
+  it('maps a 409 to duplicate_request, naming the first same-quality request that blocks it', async () => {
+    const posts = fakeSeerr(conflict, { movie: movieWithRequests() });
+    const ctx = await roundTwo(accepted);
+
+    await expect(requestMediaTool.handler(requestMovieInput(), ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.InvalidParams,
+      data: { reason: 'duplicate_request', existingRequestId: 45 },
+    });
+    expect(posts()).toBe(1);
+  });
+
+  it('raises duplicate_request for a TV 409 even when the pre-POST read found no requests', async () => {
+    fakeSeerr(conflict);
+    const ctx = await roundTwo(accepted, requestTvInput());
+    const error = await rejectionOf(() => requestMediaTool.handler(requestTvInput(), ctx));
+
+    expect(error).toMatchObject({
+      code: JsonRpcErrorCode.InvalidParams,
+      data: { reason: 'duplicate_request' },
+    });
+    expect(error.data).not.toHaveProperty('existingRequestId');
+  });
+
+  it('omits existingRequestId when the first same-quality request is declined or completed', async () => {
+    fakeSeerr(conflict, {
+      movie: movieWithRequests([
+        { id: 47, status: 3, is4k: true, createdAt: '2026-04-01T00:00:00.000Z' },
+      ]),
+    });
+    const input = requestMediaTool.input.parse({
+      mediaType: 'movie',
+      tmdbId: 1275779,
+      mode: 'request',
+      is4k: true,
+    });
+    const ctx = await roundTwo(accepted, input);
+    const error = await rejectionOf(() => requestMediaTool.handler(input, ctx));
+
+    expect(error.data).toMatchObject({ reason: 'duplicate_request' });
+    expect(error.data).not.toHaveProperty('existingRequestId');
+    expect(error.message).toBe(
+      'Seerr refused the request: a 4K request for this title already exists.',
+    );
+  });
+
+  it('carries duplicate_request, the blocking id, and its recovery on both result surfaces', async () => {
+    fakeSeerr(conflict, { movie: movieWithRequests() });
+    const ctx = await roundTwo(accepted);
+    const result = await contract(requestMovieInput(), ctx);
+
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        code: JsonRpcErrorCode.InvalidParams,
+        data: {
+          reason: 'duplicate_request',
+          existingRequestId: 45,
+          recovery: { hint: expect.stringContaining('existingRequestId') },
+        },
+      },
+    });
+    const text = JSON.stringify(result.content);
+    expect(text).toContain('#45');
+    expect(text).toContain('seerr_request_status');
+    // The recovery a content[]-only reader gets points at the #N in the message, not a field.
+    expect(text).toContain('Recovery: Track the request numbered in the message');
+    expect(JSON.stringify(result)).not.toContain('for this media');
+  });
+
+  it('chains the service refusal as the cause of duplicate_request', async () => {
+    fakeSeerr(conflict, { movie: movieWithRequests() });
+    const ctx = await roundTwo(accepted);
+    const error = await rejectionOf(() => requestMediaTool.handler(requestMovieInput(), ctx));
+
+    expect(error.cause).toMatchObject({ data: { reason: 'duplicate_request' } });
+  });
+
+  /**
+   * Seerr's check, mirrored: a movie 409 blocks on the title's first request at that
+   * quality (lowest id) while it is pending, approved, or failed. Every other 409 —
+   * every TV one — comes from the same-user auto-request rule, which names nothing here.
+   */
+  it('names no request for a TV 409, even beside an approved same-quality request', async () => {
+    fakeSeerr(conflict, { tv: tvWithRequests });
+    const ctx = await roundTwo(accepted, requestTvInput());
+    const error = await rejectionOf(() => requestMediaTool.handler(requestTvInput(), ctx));
+
+    expect(error.data).toMatchObject({ reason: 'duplicate_request' });
+    expect(error.data).not.toHaveProperty('existingRequestId');
+    expect(error.message).toBe(
+      'Seerr refused the request: a non-4K request for this title already exists.',
+    );
+  });
+
+  it('carries a TV duplicate_request without an id, and its recovery, on both result surfaces', async () => {
+    fakeSeerr(conflict, { tv: tvWithRequests });
+    const ctx = await roundTwo(accepted, requestTvInput());
+    const result = await contract(requestTvInput(), ctx);
+
+    expect(result.isError).toBe(true);
+    const { error } = result.structuredContent as { error: { data: Record<string, unknown> } };
+    expect(error.data).toMatchObject({ reason: 'duplicate_request' });
+    expect(error.data).not.toHaveProperty('existingRequestId');
+    const text = JSON.stringify(result.content);
+    expect(text).toContain('a non-4K request for this title already exists');
+    expect(text).toContain('seerr_get_media');
+    expect(text).not.toContain('#70');
+  });
+
+  it('names the lowest-id same-quality movie request, whatever its array position or createdAt', async () => {
+    fakeSeerr(conflict, {
+      movie: movieWith([
+        { id: 53, status: 2, is4k: false, createdAt: '2026-03-01T00:00:00.000Z' },
+        { id: 51, status: 1, is4k: false, createdAt: '2026-02-01T00:00:00.000Z' },
+        { id: 55, status: 4, is4k: false, createdAt: '2026-01-01T00:00:00.000Z' },
+      ]),
+    });
+    const ctx = await roundTwo(accepted);
+    const error = await rejectionOf(() => requestMediaTool.handler(requestMovieInput(), ctx));
+
+    expect(error.data).toMatchObject({ reason: 'duplicate_request', existingRequestId: 51 });
+  });
+
+  it('names none when the first same-quality movie request is declined, beside a newer approved one', async () => {
+    fakeSeerr(conflict, {
+      movie: movieWith([
+        { id: 61, status: 2, is4k: false, createdAt: '2026-02-01T00:00:00.000Z' },
+        { id: 60, status: 3, is4k: false, createdAt: '2026-01-01T00:00:00.000Z' },
+      ]),
+    });
+    const ctx = await roundTwo(accepted);
+    const error = await rejectionOf(() => requestMediaTool.handler(requestMovieInput(), ctx));
+
+    expect(error.data).toMatchObject({ reason: 'duplicate_request' });
+    expect(error.data).not.toHaveProperty('existingRequestId');
+  });
+
+  it.each([
+    { quality: 'non-4K', is4k: false, other: { id: 80, status: 2, is4k: true } },
+    { quality: '4K', is4k: true, other: { id: 81, status: 2, is4k: false } },
+  ])(
+    'names no request for a $quality 409 beside an active request at the other quality',
+    async ({ is4k, other }) => {
+      fakeSeerr(conflict, { movie: movieWith([other]) });
+      const ctx = await roundTwo(accepted, requestMovieInput(is4k));
+      const error = await rejectionOf(() => requestMediaTool.handler(requestMovieInput(is4k), ctx));
+
+      expect(error.data).toMatchObject({ reason: 'duplicate_request' });
+      expect(error.data).not.toHaveProperty('existingRequestId');
+    },
+  );
+
+  it.each([
+    {
+      is4k: false,
+      row: { id: 45, status: 2, is4k: false },
+      message: 'Seerr refused the request: non-4K request #45 for this title already exists.',
+    },
+    {
+      is4k: true,
+      row: { id: 50, status: 1, is4k: true },
+      message: 'Seerr refused the request: 4K request #50 for this title already exists.',
+    },
+  ])('words a 409 that names #$row.id at is4k=$is4k exactly', async ({ is4k, row, message }) => {
+    fakeSeerr(conflict, { movie: movieWith([row]) });
+    const ctx = await roundTwo(accepted, requestMovieInput(is4k));
+    const error = await rejectionOf(() => requestMediaTool.handler(requestMovieInput(is4k), ctx));
+
+    expect(error.message).toBe(message);
+  });
+
+  it('keeps any other refused POST status generic', async () => {
+    fakeSeerr(() => json(403, { message: 'Movie Quota exceeded.' }), {
+      movie: movieWithRequests(),
+    });
+    const ctx = await roundTwo(accepted);
+    const error = await rejectionOf(() => requestMediaTool.handler(requestMovieInput(), ctx));
+
+    expect(error.code).toBe(JsonRpcErrorCode.Forbidden);
+    expect(error.data).not.toHaveProperty('reason');
+  });
+
+  it('refuses a 202 as no_seasons_available and builds no created block', async () => {
+    const posts = fakeSeerr(() => json(202, { message: 'No seasons available to request' }));
+    const ctx = await roundTwo(accepted, requestTvInput());
+
+    await expect(requestMediaTool.handler(requestTvInput(), ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.InvalidParams,
+      data: { reason: 'no_seasons_available' },
+    });
+    expect(posts()).toBe(1);
+  });
+
+  it('carries no_seasons_available and its recovery on both result surfaces', async () => {
+    fakeSeerr(() => json(202, { message: 'No seasons available to request' }));
+    const ctx = await roundTwo(accepted, requestTvInput());
+    const result = await contract(requestTvInput(), ctx);
+
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        code: JsonRpcErrorCode.InvalidParams,
+        data: {
+          reason: 'no_seasons_available',
+          recovery: { hint: expect.stringContaining('seerr_get_media') },
+        },
+      },
+    });
+    expect(JSON.stringify(result.content)).toContain('Recovery: Nothing was created');
+    expect(JSON.stringify(result.content)).toContain('episode count');
+  });
+
+  it('declares no_seasons_available in the error contract with an actionable recovery', () => {
+    expect(requestMediaTool.errors).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          reason: 'no_seasons_available',
+          code: JsonRpcErrorCode.InvalidParams,
+          recovery: expect.stringContaining('Nothing was created'),
+        }),
+      ]),
+    );
+  });
+
+  it('returns created for a 201 answered through the service', async () => {
+    fakeSeerr(() => json(201, { id: 601, status: 2, media: { status: 3 } }), {
+      movie: movieWithRequests(),
+    });
+    const ctx = await roundTwo(accepted);
+    const result = await requestMediaTool.handler(requestMovieInput(), ctx);
+
+    expect(result.created).toEqual({
+      requestId: 601,
+      requestStatus: { raw: 2, label: 'approved' },
+      mediaStatus: { raw: 3, label: 'processing' },
+    });
+    expect(result.existingRequest).toMatchObject({ requestId: 46 });
+  });
+
+  it('never reports created for a 2xx answer without a numeric id', async () => {
+    fakeSeerr(() => json(201, { status: 1 }));
+    const ctx = await roundTwo(accepted);
+
+    await expect(requestMediaTool.handler(requestMovieInput(), ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.SerializationError,
+    });
+  });
+});
+
+describe('seerr_request_media — existing request in preview', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     service.getPublicSettings.mockResolvedValue(settings);
-  });
-
-  it('maps a 409 POST rejection to duplicate_request when an existing request is present', async () => {
-    service.getMovie.mockResolvedValue({
-      ...movie,
-      mediaInfo: {
-        requests: [{ id: 45, status: 2, is4k: false, createdAt: '2026-01-01T00:00:00.000Z' }],
-      },
-    });
-    service.createRequest.mockRejectedValue(
-      new McpError(JsonRpcErrorCode.InvalidParams, 'Request already exists', { httpStatus: 409 }),
-    );
-    const ctx = await roundTwo({ action: 'accept', content: { confirmed: true } });
-    await expect(requestMediaTool.handler(requestMovieInput(), ctx)).rejects.toMatchObject({
-      data: { reason: 'duplicate_request', existingRequestId: 45 },
-    });
   });
 
   it('surfaces the existing request in preview output', async () => {
@@ -518,9 +904,36 @@ describe('seerr_request_media — duplicate detection', () => {
     const result = await requestMediaTool.handler(input, ctx);
     expect(result.existingRequest).toMatchObject({ requestId: 45, is4k: false });
   });
+
+  it('surfaces the latest request of a show in preview output', async () => {
+    service.getTv.mockResolvedValueOnce(tvWithRequests);
+    const ctx = createMockContext({ tenantId: 'test', errors: requestMediaTool.errors });
+    const input = requestMediaTool.input.parse({ mediaType: 'tv', tmdbId: 1399, seasons: [1] });
+    const result = await requestMediaTool.handler(input, ctx);
+
+    expect(result.existingRequest).toEqual({
+      requestId: 70,
+      status: { raw: 2, label: 'approved' },
+      is4k: false,
+    });
+    const text = (requestMediaTool.format!(result)[0] as { text: string }).text;
+    expect(text).toContain('**Latest request:** #70 — status approved (2) | 4K: No');
+  });
 });
 
 describe('seerr_request_media — format', () => {
+  it('keeps a title holding a line break in one heading', () => {
+    const blocks = requestMediaTool.format!({
+      mode: 'preview',
+      resolved: { tmdbId: 1275779, mediaType: 'movie', title: 'Line\nBreak', year: 2026 },
+      capability: { is4kEnabled: true, partialRequestsEnabled: true },
+      payload: { mediaType: 'movie', mediaId: 1275779, is4k: false },
+    });
+    expect(readHeadings((blocks[0] as { text: string }).text)).toEqual([
+      'Preview: Line\nBreak (2026) — movie',
+    ]);
+  });
+
   it('renders preview vs created and every payload field', () => {
     const previewBlocks = requestMediaTool.format!({
       mode: 'preview',
@@ -540,5 +953,18 @@ describe('seerr_request_media — format', () => {
       created: { requestId: 501, requestStatus: { raw: 1, label: 'pending' } },
     });
     expect((createdBlocks[0] as { text: string }).text).toContain('Created request #501');
+  });
+
+  it('labels existingRequest as the latest request, whatever its state', () => {
+    const blocks = requestMediaTool.format!({
+      mode: 'preview',
+      resolved: { tmdbId: 1275779, mediaType: 'movie', title: 'Disclosure Day' },
+      capability: { is4kEnabled: true, partialRequestsEnabled: true },
+      payload: { mediaType: 'movie', mediaId: 1275779, is4k: false },
+      existingRequest: { requestId: 46, status: { raw: 5, label: 'completed' }, is4k: true },
+    });
+    const text = (blocks[0] as { text: string }).text;
+    expect(text).toContain('\n**Latest request:** #46 — status completed (5) | 4K: Yes');
+    expect(text).not.toContain('Existing request');
   });
 });

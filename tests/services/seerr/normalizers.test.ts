@@ -9,9 +9,10 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+  duplicateBlockerId,
   projectRequestDetail,
   redactAvailability,
-  redactOpenRequest,
+  redactLatestRequest,
   redactRootFolder,
   redactUser,
 } from '@/services/seerr/normalizers.js';
@@ -118,7 +119,27 @@ describe('redactAvailability', () => {
   });
 });
 
-describe('redactOpenRequest', () => {
+/**
+ * The fixture behind #13/#16: an approved non-4K request (#45, January) and a
+ * newer completed 4K request (#46, March). Seerr's duplicate check blocks a
+ * non-4K submit on #45, while the latest request is #46.
+ */
+const MIXED_REQUESTS: RawMediaInfo = {
+  requests: [
+    { id: 45, status: 2, is4k: false, createdAt: '2026-01-01T00:00:00.000Z' },
+    { id: 46, status: 5, is4k: true, createdAt: '2026-03-01T00:00:00.000Z' },
+  ],
+};
+
+describe('redactLatestRequest', () => {
+  it('reports the newest request at any quality and in any state', () => {
+    expect(redactLatestRequest(MIXED_REQUESTS)).toEqual({
+      requestId: 46,
+      status: { raw: 5, label: 'completed' },
+      is4k: true,
+    });
+  });
+
   it('picks the most recent request and projects it without requester PII', () => {
     const media: RawMediaInfo = {
       requests: [
@@ -138,14 +159,98 @@ describe('redactOpenRequest', () => {
         },
       ],
     };
-    const projected = redactOpenRequest(media);
+    const projected = redactLatestRequest(media);
     expect(projected).toEqual({ requestId: 11, status: { raw: 1, label: 'pending' }, is4k: true });
     assertNoLeaks(projected);
   });
 
   it('returns undefined when there are no requests', () => {
-    expect(redactOpenRequest({})).toBeUndefined();
-    expect(redactOpenRequest(undefined)).toBeUndefined();
+    expect(redactLatestRequest({})).toBeUndefined();
+    expect(redactLatestRequest(undefined)).toBeUndefined();
+  });
+});
+
+describe('duplicateBlockerId', () => {
+  it('names the first same-quality movie request while it still blocks', () => {
+    expect(duplicateBlockerId(MIXED_REQUESTS, 'movie', false)).toBe(45);
+    // #46 is the only 4K request, and it is completed — Seerr's first-row rule passes it.
+    expect(duplicateBlockerId(MIXED_REQUESTS, 'movie', true)).toBeUndefined();
+  });
+
+  it.each([
+    ['pending', 1, 10],
+    ['approved', 2, 10],
+    ['failed', 4, 10],
+    ['declined', 3, undefined],
+    ['completed', 5, undefined],
+  ])(
+    'a first request that is %s (status %i), beside a newer pending one → %s',
+    (_label, status, expected) => {
+      const media: RawMediaInfo = {
+        requests: [
+          { id: 11, status: 1, is4k: false, createdAt: '2026-02-01T00:00:00.000Z' },
+          { id: 10, status, is4k: false, createdAt: '2026-01-01T00:00:00.000Z' },
+        ],
+      };
+      expect(duplicateBlockerId(media, 'movie', false)).toBe(expected);
+    },
+  );
+
+  it('takes the first request by lowest id, not by array position or createdAt', () => {
+    const media: RawMediaInfo = {
+      requests: [
+        { id: 53, status: 2, is4k: false, createdAt: '2026-03-01T00:00:00.000Z' },
+        { id: 51, status: 1, is4k: false, createdAt: '2026-02-01T00:00:00.000Z' },
+        { id: 55, status: 4, is4k: false, createdAt: '2026-01-01T00:00:00.000Z' },
+      ],
+    };
+    expect(duplicateBlockerId(media, 'movie', false)).toBe(51);
+  });
+
+  it('looks only at requests of the submitted quality', () => {
+    const media: RawMediaInfo = {
+      requests: [
+        { id: 40, status: 2, is4k: true },
+        { id: 41, status: 3, is4k: false },
+        { id: 42, status: 2, is4k: false },
+      ],
+    };
+    // #40 is the lowest id overall, but it is 4K; the non-4K first request #41 is declined.
+    expect(duplicateBlockerId(media, 'movie', false)).toBeUndefined();
+    expect(duplicateBlockerId(media, 'movie', true)).toBe(40);
+  });
+
+  it('counts a request without is4k as non-4K', () => {
+    const media: RawMediaInfo = { requests: [{ id: 45, status: 2 }] };
+    expect(duplicateBlockerId(media, 'movie', false)).toBe(45);
+    expect(duplicateBlockerId(media, 'movie', true)).toBeUndefined();
+  });
+
+  it.each([
+    ['no status', undefined],
+    ['an unrecognized status', 9],
+  ])(
+    'names none when the first request has %s, without falling through to the next',
+    (_case, status) => {
+      const media: RawMediaInfo = {
+        requests: [
+          { id: 11, status: 2, is4k: false },
+          { id: 10, is4k: false, ...(status === undefined ? {} : { status }) },
+        ],
+      };
+      expect(duplicateBlockerId(media, 'movie', false)).toBeUndefined();
+    },
+  );
+
+  it('never names a request for TV, where every 409 comes from the auto-request rule', () => {
+    expect(duplicateBlockerId(MIXED_REQUESTS, 'tv', false)).toBeUndefined();
+    expect(duplicateBlockerId({ requests: [{ id: 70, status: 1 }] }, 'tv', false)).toBeUndefined();
+  });
+
+  it('returns undefined when there are no requests', () => {
+    expect(duplicateBlockerId({}, 'movie', false)).toBeUndefined();
+    expect(duplicateBlockerId({ requests: [] }, 'movie', false)).toBeUndefined();
+    expect(duplicateBlockerId(undefined, 'movie', true)).toBeUndefined();
   });
 });
 

@@ -3,12 +3,14 @@
  * services + capability flags so an agent can reason about request routing. The key
  * security test: filesystem paths (root folders, activeDirectory) are redacted by
  * default and surfaced only when includePaths:true. Also covers capability decoding,
- * profile-name resolution from the detail endpoint, and graceful degradation.
+ * profile-name resolution from the detail endpoint, graceful degradation, and the
+ * version and service-name headings read back through a CommonMark parse.
  * @module tests/tools/service-options.tool.test
  */
 
 import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { readHeadings } from '../helpers/commonmark.js';
 
 const service = {
   getStatus: vi.fn(),
@@ -139,5 +141,36 @@ describe('seerr_service_options', () => {
     const radarr = result.services.find((s) => s.kind === 'radarr');
     expect(radarr?.profiles).toBeUndefined(); // detail failed → omitted
     expect(getEnrichment(ctx).notice).toContain('Radarr details unavailable');
+  });
+
+  /** Renders the handler's result through format() and reads its headings back. */
+  async function renderedHeadings(): Promise<string[]> {
+    const ctx = createMockContext({ tenantId: 'test' });
+    const result = await serviceOptionsTool.handler(serviceOptionsTool.input.parse({}), ctx);
+    return readHeadings((serviceOptionsTool.format!(result)[0] as { text: string }).text);
+  }
+
+  it('renders the version heading and one heading per service', async () => {
+    expect(await renderedHeadings()).toEqual([
+      'Seerr 3.3.0 — jellyfin',
+      'Radarr — radarr [default]',
+      'Sonarr — sonarr [default]',
+    ]);
+  });
+
+  it('keeps a version holding a line break in its one heading', async () => {
+    service.getStatus.mockResolvedValue({ version: 'Line\nBreak' });
+    expect((await renderedHeadings())[0]).toBe('Seerr Line\nBreak — jellyfin');
+  });
+
+  it('keeps a service name holding a line break in its one heading', async () => {
+    service.getRadarrServices.mockResolvedValue([
+      { id: 0, name: 'Line\nBreak', is4k: false, isDefault: true, activeProfileId: 1 },
+    ]);
+    expect(await renderedHeadings()).toEqual([
+      'Seerr 3.3.0 — jellyfin',
+      'Line\nBreak — radarr [default]',
+      'Sonarr — sonarr [default]',
+    ]);
   });
 });

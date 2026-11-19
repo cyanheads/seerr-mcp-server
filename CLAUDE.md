@@ -2,8 +2,8 @@
 
 **Server:** seerr-mcp-server
 **Version:** 0.2.0
-**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.18`
-**Engines:** Bun ≥1.4.0, Node ≥24.0.0
+**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.22`
+**Engines:** Bun ≥1.4.4, Node ≥24.0.0
 **MCP SDK:** `@modelcontextprotocol/server` ^2.4.0
 **Zod:** ^4.6.7
 
@@ -67,13 +67,20 @@ export const searchMediaTool = tool('seerr_search_media', {
       }).optional().describe('Current Seerr availability; present only when tracked.'),
     })).describe('Ranked movie/TV matches. Empty array when nothing matched.'),
   }),
-  enrichment: { totalCount: z.number().describe('Total results before this page limit.') },
+  enrichment: {
+    totalCount: z.number().describe("Seerr's total across movies, TV shows, and people, mediaType not applied."),
+  },
+  // content[] total line says what the number counts; structuredContent keeps the raw value.
+  enrichmentTrailer: {
+    totalCount: { render: (total) => `**${total} total** (Seerr's count across movies, TV shows, and people)` },
+  },
 
   async handler(input, ctx) {
     const seerr = getSeerrService();
     const response = await seerr.search({ query: input.query }, ctx);
     // ... filter to movie/tv, normalize, redact mediaInfo via redactAvailability ...
-    ctx.enrich.total(response.totalResults ?? 0);
+    // Seerr's own total, never a page recount; absent, the required field fails loudly.
+    if (response.totalResults !== undefined) ctx.enrich.total(response.totalResults);
     ctx.log.info('Seerr search completed', { query: input.query });
     return { results: [] };
   },
@@ -251,11 +258,11 @@ src/
     server-config.ts                    # SEERR_BASE_URL / SEERR_API_KEY / timeout (Zod schema)
   services/
     seerr/
-      seerr-service.ts                  # Jellyseerr REST client (init/accessor pattern)
+      seerr-service.ts                  # Jellyseerr REST client (init/accessor pattern; 202 on POST /request → no_seasons_available)
       status.ts                         # Pure status decoders → { raw, label }
       normalizers.ts                    # PII/infra redaction choke point (the security boundary)
       titles.ts                         # Request → title join (deduped, capped, best-effort)
-      errors.ts                         # Upstream-error classifier (500 → media_not_found, 404 → request_not_found)
+      errors.ts                         # Upstream-error classifier by endpoint + status (500 → media_not_found, 500 on a season read → season_not_found, 404 → request_not_found, 409 on POST /request → duplicate_request, 400 on GET /request → unsupported_filter)
       types.ts                          # Raw upstream + domain types
   mcp-server/
     tools/definitions/                  # Six *.tool.ts + barrel
@@ -362,11 +369,13 @@ When you complete a skill's checklist, check the boxes and add a completion time
 
 **CI is one file.** `.github/workflows/codeql.yml` is the only GitHub Actions workflow: CodeQL is GitHub-owned end to end, and the file runs only while the repo's CodeQL *default setup* is turned off. Verification — `devcheck`, tests, the release gates — runs locally; don't add a workflow that re-runs it.
 
+**Dependency hold — `vitest` pinned at `5.1.0`.** Vitest 5.1.1's forks-pool watchdog calls `child.channel.unref()`, which Bun's IPC channel lacks ([oven-sh/bun#33593](https://github.com/oven-sh/bun/issues/33593)), so `bun run test` starts no worker. The pin is allowlisted in `devcheck.config.json` `outdated.allowlist`; lift both once a Vitest release ships [vitest-dev/vitest#12039](https://github.com/vitest-dev/vitest/pull/12039).
+
 ---
 
 ## Bundling
 
-`npm run bundle` produces a `.mcpb` extension bundle for one-click install in Claude Desktop. `mcpb pack` reads `.mcpbignore`, not `.gitignore`, so every root path the bundle must not ship — source, tests, docs, caches, logs, agent docs, plugin manifests, gitignored local files — needs a root-anchored line there (`/docs/`, never `docs/`, which also strips `node_modules/*/docs/`); `lint:packaging` names each missing or unanchored line. Root `skills/` ships on purpose. The pack step is followed by `scripts/clean-mcpb.ts`, which prunes dev dependencies (`mcpb clean`) and strips four classes of `node_modules/**` content that root-anchored `.mcpbignore` patterns cannot reach: dependency-shipped agent docs at a package root (`framework-skills/`, `skills/`, `.claude/`, `.agents/`, `SKILL.md` — a `skills/` below a package root, such as the MCP SDK's runtime `dist/ext/skills/`, stays); platform-specific native bindings, which would otherwise lock the bundle to the platform it was packed on; node-gyp build output beside a `binding.gyp` (`config.gypi`, Makefiles, `obj.target/`, `.deps/`, object files and debug symbols), which records the packing machine's paths — compiled `*.node` addons stay; and build-only package files — the framework's `changelog/`, `scripts/`, `templates/`, `CLAUDE.md`, `AGENTS.md`, and config bases (`biome.json`, `vitest.config.base.mjs`, `config/tsconfig.base.json`), and `better-sqlite3`'s `deps/` and `src/` C sources. A server using DataCanvas therefore ships a portable bundle without the DuckDB native — `@duckdb/node-api` is an optional peer loaded lazily, so canvas tools report an actionable install hint and every other tool works normally. MCPB is stdio-only — HTTP and Cloudflare Workers deployments are unaffected. Consumers who don't need it can delete `manifest.json` and `.mcpbignore`; `lint:packaging` skips cleanly.
+`npm run bundle` produces a `.mcpb` extension bundle for one-click install in Claude Desktop. `mcpb pack` reads `.mcpbignore`, not `.gitignore`, so every root path the bundle must not ship — source, tests, docs, caches, logs, agent docs, plugin manifests, gitignored local files — needs a root-anchored line there (`/docs/`, never `docs/`, which also strips `node_modules/*/docs/`); `lint:packaging` names each missing or unanchored line. Root `skills/` ships on purpose. The pack step is followed by `scripts/clean-mcpb.ts`, which prunes dev dependencies (`mcpb clean`) and strips four classes of `node_modules/**` content that root-anchored `.mcpbignore` patterns cannot reach: dependency-shipped agent docs — `framework-skills/`, `skills/`, `.claude/`, `.agents/`, `AGENTS.md`, and `CLAUDE.md` at a package's root, and `SKILL.md` anywhere (a `skills/` deeper in a package is runtime code and stays); platform-specific native bindings, which would otherwise lock the bundle to the platform it was packed on; node-gyp build output beside a `binding.gyp` (`config.gypi`, Makefiles, `obj.target/`, `.deps/`, object files and debug symbols), which records the packing machine's paths — compiled `*.node` addons stay; and build-only package files — the framework's `changelog/`, `scripts/`, `templates/`, and config bases (`biome.json`, `vitest.config.base.mjs`, `config/tsconfig.base.json`), and `better-sqlite3`'s `deps/` and `src/` C sources. A server using DataCanvas therefore ships a portable bundle without the DuckDB native — `@duckdb/node-api` is an optional peer loaded lazily, so canvas tools report an actionable install hint and every other tool works normally. MCPB is stdio-only — HTTP and Cloudflare Workers deployments are unaffected. Consumers who don't need it can delete `manifest.json` and `.mcpbignore`; `lint:packaging` skips cleanly.
 
 **Adding an env var requires both files:** `server.json` (registry discovery, `environmentVariables[]`) and `manifest.json` (bundle install UX, `mcp_config.env` + `user_config`). `lint:packaging` (run by `devcheck`) verifies the env var names match, that every `user_config` option is wired into `mcp_config.env` as `"X": "${user_config.X}"` (the host substitutes nothing else — `"${X}"` reaches the server as that literal string), and that an optional string option carries `"default": ""`.
 

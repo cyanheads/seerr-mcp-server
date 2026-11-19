@@ -1,6 +1,6 @@
 # seerr-mcp-server - Directory Structure
 
-Generated on: 2026-10-29 04:11:33
+Generated on: 2026-11-19 13:09:18
 
 ```text
 seerr-mcp-server/
@@ -148,14 +148,15 @@ seerr-mcp-server/
 │   │   │       ├── index.ts
 │   │   │       └── request.resource.ts
 │   │   └── tools/
-│   │       └── definitions/
-│   │           ├── get-media.tool.ts
-│   │           ├── index.ts
-│   │           ├── list-requests.tool.ts
-│   │           ├── request-media.tool.ts
-│   │           ├── request-status.tool.ts
-│   │           ├── search-media.tool.ts
-│   │           └── service-options.tool.ts
+│   │       ├── definitions/
+│   │       │   ├── get-media.tool.ts
+│   │       │   ├── index.ts
+│   │       │   ├── list-requests.tool.ts
+│   │       │   ├── request-media.tool.ts
+│   │       │   ├── request-status.tool.ts
+│   │       │   ├── search-media.tool.ts
+│   │       │   └── service-options.tool.ts
+│   │       └── escape-markdown-heading.ts
 │   ├── services/
 │   │   └── seerr/
 │   │       ├── errors.ts
@@ -166,6 +167,8 @@ seerr-mcp-server/
 │   │       └── types.ts
 │   └── index.ts
 ├── tests/
+│   ├── helpers/
+│   │   └── commonmark.ts
 │   ├── resources/
 │   │   └── request.resource.test.ts
 │   ├── scripts/
@@ -177,6 +180,7 @@ seerr-mcp-server/
 │   │       ├── status.test.ts
 │   │       └── titles.test.ts
 │   └── tools/
+│       ├── escape-markdown-heading.test.ts
 │       ├── get-media.tool.test.ts
 │       ├── list-requests.tool.test.ts
 │       ├── request-media.tool.test.ts

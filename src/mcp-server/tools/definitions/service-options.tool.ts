@@ -13,6 +13,7 @@
 import type { Context } from '@cyanheads/mcp-ts-core';
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
+import { escapeMarkdownHeading } from '@/mcp-server/tools/escape-markdown-heading.js';
 import { redactProfile, redactRootFolder } from '@/services/seerr/normalizers.js';
 import { getSeerrService, type SeerrService } from '@/services/seerr/seerr-service.js';
 import { decodeMediaServer } from '@/services/seerr/status.js';
@@ -229,14 +230,14 @@ export const serviceOptionsTool = tool('seerr_service_options', {
   format: (result) => {
     const lines: string[] = [];
     const i = result.instance;
-    lines.push(`# Seerr ${escapeMarkdownInline(i.version)} — ${i.mediaServer}`);
+    lines.push(`# Seerr ${escapeMarkdownHeading(i.version)} — ${i.mediaServer}`);
     lines.push(
       `**4K movies:** ${i.movie4kEnabled} | **4K series:** ${i.series4kEnabled} | **Partial requests:** ${i.partialRequestsEnabled} | **Specials:** ${i.specialEpisodesEnabled}`,
     );
     for (const s of result.services) {
       lines.push('');
       lines.push(
-        `## ${escapeMarkdownInline(s.name)} — ${s.kind}${s.isDefault ? ' [default]' : ''}`,
+        `## ${escapeMarkdownHeading(s.name)} — ${s.kind}${s.isDefault ? ' [default]' : ''}`,
       );
       lines.push(
         `**Server ID:** ${s.serverId} | **4K:** ${s.is4k ? 'Yes' : 'No'} | **Default profile ID:** ${s.activeProfileId}`,

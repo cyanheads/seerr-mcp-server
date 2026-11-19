@@ -2,13 +2,17 @@
  * @fileoverview Tests for SeerrService, mocking global `fetch`. The service checks
  * `response.ok` and routes non-OK responses through the not-found classifier — so a
  * mocked non-OK Response MUST drive the throwing error path (it does, via the
- * service's `request()` pipeline). Covers: 500 "Unable to retrieve movie." →
- * media_not_found (NotFound), 404 "Request not found." → request_not_found
- * (NotFound), the X-Api-Key header, the settings cache, and the wire form of
- * every query string (Seerr rejects reserved characters it sees undecoded).
+ * service's `request()` pipeline). Covers: 500 "Unable to retrieve movie." or
+ * "…series." → media_not_found (NotFound), a season read's 500 "Unable to retrieve
+ * season." → season_not_found (NotFound), 404 "Request not found." →
+ * request_not_found (NotFound), the generic mapping outside each classified shape,
+ * no upstream body on an unclassified error, the X-Api-Key header, the settings
+ * cache, and the wire form of every query string (Seerr rejects reserved
+ * characters it sees undecoded).
  * @module tests/services/seerr/seerr-service.test
  */
 
+import type { Context } from '@cyanheads/mcp-ts-core';
 import type { AppConfig } from '@cyanheads/mcp-ts-core/config';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createInMemoryStorage, createMockContext } from '@cyanheads/mcp-ts-core/testing';
@@ -100,7 +104,12 @@ describe('SeerrService', () => {
     );
   });
 
-  it('builds the request-list query through the same encoder, omitting mediaType:all', async () => {
+  /**
+   * Overseerr and Jellyseerr < 2.2 reject `sortDirection` as an unknown query key,
+   * and every upstream already orders newest first without it — so the default
+   * `desc` stays off the wire and only `asc` is sent.
+   */
+  it('builds the request-list query through the same encoder, omitting mediaType:all and the default sortDirection', async () => {
     fetchMock.mockResolvedValue(jsonResponse(200, { pageInfo: {}, results: [] }));
     const ctx = createMockContext({ tenantId: 'test' });
     await getSeerrService().listRequests(
@@ -117,8 +126,81 @@ describe('SeerrService', () => {
     );
 
     expect(String(fetchMock.mock.calls[0]![0])).toBe(
-      'http://seerr.test:5055/api/v1/request?take=10&skip=0&filter=all&sort=added&sortDirection=desc&requestedBy=7',
+      'http://seerr.test:5055/api/v1/request?take=10&skip=0&filter=all&sort=added&requestedBy=7',
     );
+  });
+
+  it('forwards sortDirection only when it is asc, and mediaType when it is movie or tv', async () => {
+    fetchMock.mockImplementation(async () => jsonResponse(200, { pageInfo: {}, results: [] }));
+    const ctx = createMockContext({ tenantId: 'test' });
+    await getSeerrService().listRequests(
+      {
+        take: 20,
+        skip: 40,
+        filter: 'pending',
+        sort: 'modified',
+        sortDirection: 'asc',
+        mediaType: 'movie',
+      },
+      ctx,
+    );
+    await getSeerrService().listRequests(
+      { take: 20, skip: 0, filter: 'all', sort: 'added', sortDirection: 'desc', mediaType: 'tv' },
+      ctx,
+    );
+
+    expect(fetchMock.mock.calls.map(([url]) => String(url))).toEqual([
+      'http://seerr.test:5055/api/v1/request?take=20&skip=40&filter=pending&sort=modified&sortDirection=asc&mediaType=movie',
+      'http://seerr.test:5055/api/v1/request?take=20&skip=0&filter=all&sort=added&mediaType=tv',
+    ]);
+  });
+
+  /**
+   * `GET /request` takes no body, so its 400 is always a rejected query parameter
+   * from an instance older than the input it was sent. The validator's body names
+   * the parameter, but Seerr error bodies never reach output.
+   */
+  it('maps a 400 from GET /request to unsupported_filter without echoing the upstream body', async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse(400, {
+        message: "Unknown query parameter 'sortDirection'",
+        errors: [
+          { path: '.query.sortDirection', message: "Unknown query parameter 'sortDirection'" },
+        ],
+      }),
+    );
+    const ctx = createMockContext({ tenantId: 'test' });
+
+    const error = await getSeerrService()
+      .listRequests(
+        { take: 20, skip: 0, filter: 'all', sort: 'added', sortDirection: 'asc', mediaType: 'all' },
+        ctx,
+      )
+      .then(
+        () => undefined,
+        (err: unknown) => err as Error & { code?: number; data?: Record<string, unknown> },
+      );
+
+    expect(error).toMatchObject({
+      code: JsonRpcErrorCode.InvalidParams,
+      data: { reason: 'unsupported_filter', httpStatus: 400, retryable: false },
+    });
+    expect(`${error?.message} ${JSON.stringify(error?.data)}`).not.toContain('Unknown query');
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it('leaves a 400 from any other endpoint generic', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(400, { message: 'bad' }));
+    const ctx = createMockContext({ tenantId: 'test' });
+
+    const error = await getSeerrService()
+      .getStatus(ctx)
+      .then(
+        () => undefined,
+        (err: unknown) => err as { code?: number; data?: Record<string, unknown> },
+      );
+    expect(error?.code).toBe(JsonRpcErrorCode.InvalidParams);
+    expect(error?.data).not.toHaveProperty('reason');
   });
 
   it('classifies a 500 "Unable to retrieve movie." as media_not_found (NotFound) with a recovery hint', async () => {
@@ -150,6 +232,116 @@ describe('SeerrService', () => {
         retryable: false,
         recovery: { hint: expect.stringContaining('seerr_list_requests') },
       },
+    });
+  });
+
+  it('classifies a show read\'s 500 "Unable to retrieve series." as media_not_found, unretried', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(500, { message: 'Unable to retrieve series.' }));
+    const ctx = createMockContext({ tenantId: 'test' });
+
+    await expect(getSeerrService().getTv(404404, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.NotFound,
+      data: { reason: 'media_not_found', httpStatus: 500, retryable: false },
+    });
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  /**
+   * Seerr answers `GET /tv/{id}/season/{n}` for a season TMDB doesn't have with
+   * HTTP 500 `{"message":"Unable to retrieve season."}`. By status alone that is a
+   * retryable outage; the season read's own endpoint tag makes it a final not-found.
+   */
+  it('classifies a season read\'s 500 "Unable to retrieve season." as season_not_found, unretried', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(500, { message: 'Unable to retrieve season.' }));
+    const ctx = createMockContext({ tenantId: 'test' });
+
+    await expect(getSeerrService().getSeason(1399, 99, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.NotFound,
+      data: { reason: 'season_not_found', httpStatus: 500, retryable: false },
+    });
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(String(fetchMock.mock.calls[0]![0])).toBe(
+      'http://seerr.test:5055/api/v1/tv/1399/season/99',
+    );
+  });
+
+  /**
+   * Each classified shape keys on endpoint, status, and body together. A shape's
+   * status from another endpoint, its body at another status, and another body at
+   * its status all keep the status-based mapping, with no reason attached.
+   */
+  describe('outside every classified shape', () => {
+    type Read = (ctx: Context) => Promise<unknown>;
+    const listAll: Read = (ctx) =>
+      getSeerrService().listRequests(
+        {
+          take: 20,
+          skip: 0,
+          filter: 'all',
+          sort: 'added',
+          sortDirection: 'desc',
+          mediaType: 'all',
+        },
+        ctx,
+      );
+    const readRequest: Read = (ctx) => getSeerrService().getRequest(45, ctx);
+    const readMovie: Read = (ctx) => getSeerrService().getMovie(550, ctx, { maxRetries: 0 });
+    const readSeason: Read = (ctx) => getSeerrService().getSeason(1399, 99, ctx);
+
+    it.each<[string, Read, number, string, number]>([
+      ['a 409 from GET /request', listAll, 409, 'conflict', JsonRpcErrorCode.Conflict],
+      ['a 409 from GET /request/{id}', readRequest, 409, 'conflict', JsonRpcErrorCode.Conflict],
+      [
+        'a movie read 500 with a generic body',
+        readMovie,
+        500,
+        'Internal Server Error',
+        JsonRpcErrorCode.ServiceUnavailable,
+      ],
+      [
+        'a request read 404 with a generic body',
+        readRequest,
+        404,
+        'Not Found',
+        JsonRpcErrorCode.NotFound,
+      ],
+      [
+        'a movie read 500 with the season body',
+        readMovie,
+        500,
+        'Unable to retrieve season.',
+        JsonRpcErrorCode.ServiceUnavailable,
+      ],
+      [
+        'a season read 404 with the season body',
+        readSeason,
+        404,
+        'Unable to retrieve season.',
+        JsonRpcErrorCode.NotFound,
+      ],
+      [
+        'a season read 500 with a generic body',
+        readSeason,
+        500,
+        'Internal Server Error',
+        JsonRpcErrorCode.ServiceUnavailable,
+      ],
+    ])('keeps %s generic', async (_label, read, status, message, code) => {
+      vi.useFakeTimers();
+      try {
+        fetchMock.mockImplementation(async () => jsonResponse(status, { message }));
+        const outcome = read(createMockContext({ tenantId: 'test' })).then(
+          () => undefined,
+          (err: unknown) => err as { code?: number; data?: Record<string, unknown> },
+        );
+        await vi.runAllTimersAsync();
+        const error = await outcome;
+
+        expect(error?.code).toBe(code);
+        expect(error?.data).not.toHaveProperty('reason');
+      } finally {
+        vi.useRealTimers();
+      }
     });
   });
 
@@ -214,6 +406,33 @@ describe('SeerrService', () => {
     const serialized = `${error?.message} ${JSON.stringify(error?.data ?? {})}`;
     expect(serialized).not.toContain('seerr.test');
     expect(serialized).not.toContain('TEST-API-KEY');
+  });
+
+  /**
+   * Radarr and Sonarr error strings Seerr relays can name an internal service URL
+   * or a root-folder path, so the unclassified fallback carries no upstream body —
+   * not in the message, and not in `data`, where a captured body would land.
+   */
+  it('keeps an unclassified error body, and the infrastructure it names, off the thrown error', async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse(502, {
+        message:
+          'Radarr at http://10.0.0.5:7878 refused the add: root folder /mnt/media/movies is not writable',
+      }),
+    );
+    const ctx = createMockContext({ tenantId: 'test' });
+
+    const error = await getSeerrService()
+      .getMovie(550, ctx, { maxRetries: 0 })
+      .then(
+        () => undefined,
+        (err: unknown) => err as Error & { code?: number; data?: Record<string, unknown> },
+      );
+
+    expect(error?.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+    const serialized = `${error?.message} ${JSON.stringify(error?.data ?? {})}`;
+    expect(serialized).not.toContain('10.0.0.5:7878');
+    expect(serialized).not.toContain('/mnt/media/movies');
   });
 
   /**
@@ -287,5 +506,116 @@ describe('SeerrService', () => {
     await getSeerrService().getPublicSettings(ctx, { forceRefresh: true });
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  /**
+   * `POST /request` answers 201 with the new `MediaRequest`, 409 for a same-quality
+   * duplicate, and 202 when every requested season is already requested or
+   * available — each with a `{ message }` body and no request ID. Only the 201
+   * creates anything, so only a body carrying a numeric `id` may come back.
+   */
+  describe('createRequest', () => {
+    const body = { mediaType: 'tv' as const, mediaId: 1399, is4k: false, seasons: [1] };
+
+    /** Settle the POST and return its outcome, keeping the mocked fetch's call log. */
+    const submit = () =>
+      getSeerrService()
+        .createRequest(body, createMockContext({ tenantId: 'test' }))
+        .then(
+          (value) => ({ value }),
+          (error: Error & { code?: number; data?: Record<string, unknown> }) => ({ error }),
+        );
+
+    it('returns the created request on a 201', async () => {
+      fetchMock.mockResolvedValue(jsonResponse(201, { id: 601, status: 2, media: { status: 3 } }));
+      expect(await submit()).toEqual({ value: { id: 601, status: 2, media: { status: 3 } } });
+      expect(fetchMock).toHaveBeenCalledOnce();
+    });
+
+    it('maps a 409 to duplicate_request without echoing the upstream body', async () => {
+      fetchMock.mockResolvedValue(
+        jsonResponse(409, { message: 'Request for this media already exists.' }),
+      );
+      const { error } = (await submit()) as { error: Error & { data?: object } };
+
+      expect(error).toMatchObject({
+        code: JsonRpcErrorCode.InvalidParams,
+        data: { reason: 'duplicate_request', httpStatus: 409, retryable: false },
+      });
+      expect(`${error.message} ${JSON.stringify(error.data)}`).not.toContain('for this media');
+      expect(fetchMock).toHaveBeenCalledOnce();
+    });
+
+    it('refuses a 202 as no_seasons_available instead of returning its body', async () => {
+      fetchMock.mockResolvedValue(
+        jsonResponse(202, { message: 'No seasons available to request' }),
+      );
+      const { error } = (await submit()) as { error: Error & { data?: object } };
+
+      expect(error).toMatchObject({
+        code: JsonRpcErrorCode.InvalidParams,
+        data: { reason: 'no_seasons_available', httpStatus: 202, retryable: false },
+      });
+      expect(`${error.message} ${JSON.stringify(error.data)}`).not.toContain(
+        'No seasons available',
+      );
+      expect(fetchMock).toHaveBeenCalledOnce();
+    });
+
+    /**
+     * Seerr 3.5+ expands `"all"` to the numbered seasons whose `episode_count > 0`, so
+     * an announced show with no episodes listed also answers 202 — nothing in it is
+     * requested or available, and the message must not say otherwise.
+     */
+    it('names the no-episodes case in the 202 message', async () => {
+      fetchMock.mockResolvedValue(
+        jsonResponse(202, { message: 'No seasons available to request' }),
+      );
+      const { error } = (await submit()) as { error: Error };
+
+      expect(error.message).toContain('already requested or available');
+      expect(error.message).toContain('no episodes');
+    });
+
+    it.each([
+      ['a body with no id', () => jsonResponse(201, { status: 1 })],
+      ['a non-numeric id', () => jsonResponse(201, { id: '601', status: 1 })],
+      ['an empty body', () => new Response(null, { status: 201 })],
+      ['a JSON null', () => jsonResponse(200, null)],
+    ])('never returns a 2xx answer carrying %s', async (_label, respond) => {
+      fetchMock.mockImplementation(async () => respond());
+      const { error } = (await submit()) as { error: Error & { data?: object } };
+
+      expect(error).toMatchObject({
+        code: JsonRpcErrorCode.SerializationError,
+        data: { recovery: { hint: expect.stringContaining('seerr_get_media') } },
+      });
+      expect(fetchMock).toHaveBeenCalledOnce();
+    });
+
+    /** Seerr's OpenAPI validator answers a malformed body with a 400 here. */
+    it.each([
+      [400, JsonRpcErrorCode.InvalidParams],
+      [403, JsonRpcErrorCode.Forbidden],
+      [500, JsonRpcErrorCode.ServiceUnavailable],
+    ])('keeps a %i on the POST classified by status alone', async (status, code) => {
+      fetchMock.mockResolvedValue(jsonResponse(status, { message: 'Request refused.' }));
+      const { error } = (await submit()) as { error: { code?: number; data?: object } };
+
+      expect(error.code).toBe(code);
+      expect(error.data).not.toHaveProperty('reason');
+    });
+
+    it('leaves a 409 from a read endpoint generic', async () => {
+      fetchMock.mockResolvedValue(jsonResponse(409, { message: 'conflict' }));
+      const error = await getSeerrService()
+        .getStatus(createMockContext({ tenantId: 'test' }))
+        .then(
+          () => undefined,
+          (err: unknown) => err as { code?: number; data?: Record<string, unknown> },
+        );
+      expect(error?.code).toBe(JsonRpcErrorCode.Conflict);
+      expect(error?.data).not.toHaveProperty('reason');
+    });
   });
 });

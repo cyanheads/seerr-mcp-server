@@ -76,28 +76,75 @@ export function normalizeSeasons(raw: RawMediaRequest): number[] {
     .filter((n): n is number => typeof n === 'number');
 }
 
-/** The existing-request projection surfaced on detail/preview outputs. */
-export interface DomainOpenRequest {
+/** The latest-request projection surfaced on detail/preview outputs. */
+export interface DomainLatestRequest {
   is4k: boolean;
   requestId: number;
   status: DecodedStatus;
 }
 
 /**
- * Pick the most recent request from a raw `MediaInfo.requests[]` and project it to
+ * Pick the most recent request from a raw `MediaInfo.requests[]` — at any quality
+ * and in any state, declined and completed included — and project it to
  * `{ requestId, status, is4k }`. Returns `undefined` when there are no requests.
  */
-export function redactOpenRequest(media: RawMediaInfo | undefined): DomainOpenRequest | undefined {
-  const requests = media?.requests;
-  if (!Array.isArray(requests) || requests.length === 0) return;
-  const latest = requests.reduce((newest, r) =>
-    requestSortKey(r) >= requestSortKey(newest) ? r : newest,
-  );
+export function redactLatestRequest(
+  media: RawMediaInfo | undefined,
+): DomainLatestRequest | undefined {
+  const latest = newestOf(requestsOf(media));
+  if (!latest) return;
   return {
     requestId: latest.id,
     status: decodeRequestStatus(latest.status ?? 1),
     is4k: latest.is4k === true,
   };
+}
+
+/** States of a movie's first same-quality request that make Seerr refuse another one. */
+const BLOCKING_REQUEST_LABELS = new Set(['pending', 'approved', 'failed']);
+
+/**
+ * ID of the request Seerr's duplicate check refused a new submit on, or `undefined`
+ * when none is named. Mirrors `MediaRequest.request` (Seerr v3.5.2, Overseerr
+ * v1.35.0), which loads every request for the title at the submitted quality,
+ * unordered, and answers HTTP 409 when either
+ *   - the title is a movie and the first row is neither declined nor completed, or
+ *   - a row by the same requesting user is an auto-request and the media at that
+ *     quality isn't deleted (movies and TV).
+ * Only the first rule is attributed here, so a 409 from the auto-request rule —
+ * every TV one — names none. The first row is taken as the lowest request `id` at
+ * that quality, sorted here because `mediaInfo.requests` arrives unordered, and
+ * named only when its status decodes to pending, approved, or failed; any other
+ * state leaves the auto-request rule as the cause. A missing `is4k` counts as non-4K.
+ */
+export function duplicateBlockerId(
+  media: RawMediaInfo | undefined,
+  mediaType: 'movie' | 'tv',
+  is4k: boolean,
+): number | undefined {
+  if (mediaType !== 'movie') return;
+  const first = requestsOf(media)
+    .filter((r) => (r.is4k === true) === is4k)
+    .reduce<RawMediaRequest | undefined>(
+      (lowest, r) => (lowest === undefined || r.id < lowest.id ? r : lowest),
+      undefined,
+    );
+  if (typeof first?.status !== 'number') return;
+  return BLOCKING_REQUEST_LABELS.has(decodeRequestStatus(first.status).label)
+    ? first.id
+    : undefined;
+}
+
+/** `MediaInfo.requests[]`, or an empty list when the detail carries none (or no array). */
+function requestsOf(media: RawMediaInfo | undefined): RawMediaRequest[] {
+  const requests = media?.requests;
+  return Array.isArray(requests) ? requests : [];
+}
+
+/** The newest of a set of requests by `requestSortKey`; `undefined` for an empty set. */
+function newestOf(requests: RawMediaRequest[]): RawMediaRequest | undefined {
+  if (requests.length === 0) return;
+  return requests.reduce((newest, r) => (requestSortKey(r) >= requestSortKey(newest) ? r : newest));
 }
 
 /** Sort key for "most recent" request — `createdAt` epoch, falling back to `id`. */

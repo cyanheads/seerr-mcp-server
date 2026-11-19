@@ -11,7 +11,9 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
+import { escapeMarkdownHeading } from '@/mcp-server/tools/escape-markdown-heading.js';
 import { normalizeSeasons, redactUser } from '@/services/seerr/normalizers.js';
 import { getSeerrService } from '@/services/seerr/seerr-service.js';
 import {
@@ -47,12 +49,14 @@ export const listRequestsTool = tool('seerr_list_requests', {
       ])
       .default('all')
       .describe(
-        'Lifecycle filter. "pending" = awaiting approval; "processing" = downloading; "available" = ready to watch; "failed" = needs retry in Seerr.',
+        'Lifecycle filter. "pending" = awaiting approval; "processing" = downloading; "available" = ready to watch; "failed" = needs retry in Seerr. "deleted" and "completed" need Seerr, Jellyseerr 2.6+, or Overseerr 1.35+.',
       ),
     mediaType: z
       .enum(['movie', 'tv', 'all'])
       .default('all')
-      .describe('Restrict to movies, TV, or both.'),
+      .describe(
+        'Restrict to movies, TV, or both. "movie" and "tv" need Seerr or Jellyseerr 2.6+; Overseerr rejects them, so use "all" there.',
+      ),
     requestedById: z
       .number()
       .int()
@@ -68,7 +72,9 @@ export const listRequestsTool = tool('seerr_list_requests', {
     sortDirection: z
       .enum(['asc', 'desc'])
       .default('desc')
-      .describe('Sort direction. Default desc shows the most recent first.'),
+      .describe(
+        'Sort direction. Default desc shows the most recent first. "asc" needs Seerr or Jellyseerr 2.2+; Overseerr always returns newest first and rejects "asc".',
+      ),
     take: z
       .number()
       .int()
@@ -136,6 +142,7 @@ export const listRequestsTool = tool('seerr_list_requests', {
         filter: z.string().describe('The lifecycle filter applied.'),
         mediaType: z.string().describe('The media-type filter applied.'),
         sort: z.string().describe('The sort key applied.'),
+        sortDirection: z.string().describe('The sort direction applied.'),
       })
       .describe('The filter set the server applied to the request list.'),
     truncated: z
@@ -153,10 +160,27 @@ export const listRequestsTool = tool('seerr_list_requests', {
   },
   enrichmentTrailer: {
     appliedFilters: {
-      render: (f: { filter: string; mediaType: string; sort: string }) =>
-        `**Filters:** status=${f.filter}, media=${f.mediaType}, sort=${f.sort}`,
+      render: (f: { filter: string; mediaType: string; sort: string; sortDirection: string }) =>
+        `**Filters:** status=${f.filter}, media=${f.mediaType}, sort=${f.sort} ${f.sortDirection}`,
     },
   },
+  errors: [
+    {
+      reason: 'unsupported_filter',
+      code: JsonRpcErrorCode.InvalidParams,
+      when: 'Seerr rejected the list query with HTTP 400: the instance is a version that does not accept the requested mediaType, sortDirection, or filter value.',
+      /**
+       * The first retry keeps `filter`: Overseerr 1.35 rejects `mediaType` but accepts
+       * "deleted", and its status 6 does not decode as deleted client-side. Seerr selects
+       * "failed" and "completed" on the request status, "deleted" on the media status
+       * (status4k for a 4K request).
+       */
+      recovery:
+        'Retry with mediaType "all" and the default sortDirection, keeping filter. If that is rejected too and filter was "failed", "completed", or "deleted", retry with filter "all" and pick the rows yourself: "failed" and "completed" by each row\'s requestStatus, "deleted" by its mediaStatus (mediaStatus4k on an is4k row).',
+      /** Raised by the service-layer classifier in `services/seerr/errors.ts`, not by a handler `ctx.fail`. */
+      thrownBy: 'service',
+    },
+  ],
 
   async handler(input, ctx) {
     const seerr = getSeerrService();
@@ -223,7 +247,12 @@ export const listRequestsTool = tool('seerr_list_requests', {
     const total = response.pageInfo?.results ?? requests.length;
     ctx.enrich.total(total);
     ctx.enrich({
-      appliedFilters: { filter: input.filter, mediaType: input.mediaType, sort: input.sort },
+      appliedFilters: {
+        filter: input.filter,
+        mediaType: input.mediaType,
+        sort: input.sort,
+        sortDirection: input.sortDirection,
+      },
     });
     const notices: string[] = [];
     if (requests.length === 0) {
@@ -282,7 +311,7 @@ export const listRequestsTool = tool('seerr_list_requests', {
     const lines: string[] = [];
     for (const r of result.requests) {
       lines.push(
-        `## Request #${r.requestId} — ${r.title !== undefined ? escapeMarkdownInline(r.title) : 'Untitled'} (${r.mediaType}, 4K=${r.is4k})`,
+        `## Request #${r.requestId} — ${r.title !== undefined ? escapeMarkdownHeading(r.title) : 'Untitled'} (${r.mediaType}, 4K=${r.is4k})`,
       );
       const facts = [
         `**TMDB ID:** ${r.tmdbId ?? 'n/a'}`,

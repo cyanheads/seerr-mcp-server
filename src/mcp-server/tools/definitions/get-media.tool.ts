@@ -3,17 +3,20 @@
  * `GET /movie/{id}` or `GET /tv/{id}`, optionally `GET /tv/{id}/season/{n}` for an
  * episode list. Returns availability + whether a request already exists (derived
  * from `mediaInfo.requests[]`, most-recent first). A missing TMDB id surfaces as a
- * clean `media_not_found` (Seerr's raw HTTP 500 is classified in the service layer).
+ * clean `media_not_found` and a season the show lacks as `season_not_found` (Seerr
+ * answers both with HTTP 500, classified in the service layer). The show is read
+ * before the season, so an unknown show never reports `season_not_found`.
  * @module mcp-server/tools/definitions/get-media.tool
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
+import { escapeMarkdownHeading } from '@/mcp-server/tools/escape-markdown-heading.js';
 import {
   redactAvailability,
   redactEpisode,
-  redactOpenRequest,
+  redactLatestRequest,
   redactSeason,
 } from '@/services/seerr/normalizers.js';
 import { getSeerrService } from '@/services/seerr/seerr-service.js';
@@ -29,7 +32,7 @@ function yearOf(date: string | undefined): number | undefined {
 export const getMediaTool = tool('seerr_get_media', {
   title: 'seerr-mcp-server: get media',
   description:
-    "Fetch exact movie or show details by TMDB ID and media type to confirm the right title before any write. Returns availability and any existing open request. For TV, omit seasonNumber for a per-season summary, or pass a seasonNumber to fetch that season's episode list. Get the tmdbId from seerr_search_media first.",
+    "Fetch exact movie or show details by TMDB ID and media type to confirm the right title before any write. Returns availability and the title's latest request, whatever its quality or state. For TV, omit seasonNumber for a per-season summary, or pass a seasonNumber to fetch that season's episode list. Get the tmdbId from seerr_search_media first.",
   annotations: { readOnlyHint: true, openWorldHint: true },
   input: z.object({
     mediaType: z
@@ -69,13 +72,15 @@ export const getMediaTool = tool('seerr_get_media', {
         status4k: StatusRef.optional().describe('Decoded 4K availability when 4K is enabled.'),
         openRequest: z
           .object({
-            requestId: z.number().describe('Existing request ID — pass to seerr_request_status.'),
+            requestId: z
+              .number()
+              .describe('ID of the latest request — pass to seerr_request_status.'),
             status: StatusRef.describe('Decoded request status {raw,label}.'),
-            is4k: z.boolean().describe('Whether the open request is for 4K.'),
+            is4k: z.boolean().describe('Whether the latest request is for 4K.'),
           })
           .optional()
           .describe(
-            'Most recent existing request for this title, if any — avoids duplicate requests.',
+            'Latest request for this title at any quality and in any state, declined and completed included; omitted when the title has none. Read its status and is4k before calling it open or a duplicate.',
           ),
       })
       .describe('Seerr availability + existing-request context for this title.'),
@@ -119,6 +124,15 @@ export const getMediaTool = tool('seerr_get_media', {
       /** Raised by the service-layer classifier in `services/seerr/errors.ts`, not by a handler `ctx.fail`. */
       thrownBy: 'service',
     },
+    {
+      reason: 'season_not_found',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'The seasonNumber does not resolve to a season of the show (Seerr returns HTTP 500 "Unable to retrieve season.").',
+      recovery:
+        "Call seerr_get_media without seasonNumber to list the show's seasons, then retry with one of the listed season numbers.",
+      /** Raised by the service-layer classifier in `services/seerr/errors.ts`, not by a handler `ctx.fail`. */
+      thrownBy: 'service',
+    },
   ],
 
   async handler(input, ctx) {
@@ -127,7 +141,7 @@ export const getMediaTool = tool('seerr_get_media', {
     if (input.mediaType === 'movie') {
       const movie = await seerr.getMovie(input.tmdbId, ctx);
       const media = movie.mediaInfo;
-      const openRequest = redactOpenRequest(media);
+      const openRequest = redactLatestRequest(media);
       const availability = {
         tracked: media !== undefined,
         ...redactAvailability(media ?? {}),
@@ -152,7 +166,7 @@ export const getMediaTool = tool('seerr_get_media', {
     // TV
     const tv = await seerr.getTv(input.tmdbId, ctx);
     const media = tv.mediaInfo;
-    const openRequest = redactOpenRequest(media);
+    const openRequest = redactLatestRequest(media);
     const availability = {
       tracked: media !== undefined,
       ...redactAvailability(media ?? {}),
@@ -186,7 +200,7 @@ export const getMediaTool = tool('seerr_get_media', {
   format: (result) => {
     const lines: string[] = [];
     const yearPart = result.year !== undefined ? ` (${result.year})` : '';
-    lines.push(`# ${escapeMarkdownInline(result.title)}${yearPart} — ${result.mediaType}`);
+    lines.push(`# ${escapeMarkdownHeading(result.title)}${yearPart} — ${result.mediaType}`);
     const facts = [`**TMDB ID:** ${result.tmdbId}`];
     if (result.runtimeMinutes !== undefined)
       facts.push(`**Runtime:** ${result.runtimeMinutes} min`);
@@ -201,7 +215,7 @@ export const getMediaTool = tool('seerr_get_media', {
     );
     if (a.openRequest) {
       lines.push(
-        `**Open request:** #${a.openRequest.requestId} — status ${statusText(a.openRequest.status)} | 4K=${a.openRequest.is4k} — track with seerr_request_status.`,
+        `**Latest request:** #${a.openRequest.requestId} — status ${statusText(a.openRequest.status)} | 4K=${a.openRequest.is4k} — track with seerr_request_status.`,
       );
     }
     if (result.overview) {

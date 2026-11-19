@@ -4,7 +4,7 @@ description: Judgment for the seerr_* tools on a self-hosted Seerr/Jellyseerr/Ov
 license: Apache-2.0
 metadata:
   author: cyanheads
-  version: "1.0"
+  version: "1.1"
 ---
 
 ## Scope
@@ -30,9 +30,9 @@ For catalog questions (what else is like X, who stars in it), a TMDB catalog ser
 
 2. **`tracked: false` means Seerr has no record of the title.** Nobody has requested it and Seerr hasn't seen it in the library. Search results omit `availability` for an untracked title; `seerr_get_media` reports it as `unknown (1)`, which here means "no record", not "state can't be determined".
 
-3. **`openRequest` and `existingRequest` are only the most recent request.** They report the latest request for the title at any quality and in any state, completed and declined included. The label "open" doesn't mean it is still open, so read its `status` and `is4k` before you say a request is pending. For a movie, Seerr refuses a second request at the same quality while one is pending, approved, or failed. After a declined or completed one, it accepts a new request.
+3. **`openRequest` and `existingRequest` are only the most recent request.** They report the latest request for the title at any quality and in any state, completed and declined included. The label "open" doesn't mean it is still open, so read its `status` and `is4k` before you say a request is pending. For a movie, Seerr refuses another request at the same quality while the title's first request at that quality is pending, approved, or failed. Once that one is declined or completed, it accepts new ones, even beside a later request that is still pending. Seerr also refuses any request, movie or TV, at a quality where the API key's account already holds an auto-request for the title.
 
-4. **Season-level state isn't exposed.** `seerr_get_media` lists each season's episode count, but not its availability or request state. A show reads `partially_available` as a whole. The seasons already asked for appear in each request's `seasons` (from `seerr_request_status` or the list rows). When a TV request arrives, Seerr drops any season that is already requested or available and requests the rest. If no season is left, it creates nothing and the submit returns an error, not a `created.requestId`. Only a response that carries `created.requestId` means a new request exists.
+4. **Season-level state isn't exposed.** `seerr_get_media` lists each season's episode count, but not its availability or request state. A show reads `partially_available` as a whole. The seasons already asked for appear in each request's `seasons` (from `seerr_request_status` or the list rows). When a TV request arrives, Seerr drops any season that is already requested or available and requests the rest. If no season is left, it creates nothing and the submit returns `no_seasons_available`, not a `created.requestId`. Only a response that carries `created.requestId` means a new request exists.
 
 5. **The confirmation belongs to the user.** `mode: request` makes the client show the user a yes/no prompt that names the title, plus 4K when requested and the seasons for TV. It carries no year, so the preview step is where the user confirms which title it is. The agent never answers it.
    - A declined or cancelled prompt returns `request_cancelled`. Treat that as the user's answer and resubmit only if they ask again.
@@ -42,8 +42,9 @@ For catalog questions (what else is like X, who stars in it), a TMDB catalog ser
 
 7. **After a refused or failed submit, check before retrying.** A submit is attempted once, with no automatic retry.
    - **HTTP 403:** Seerr refused it for permission, quota, or a blocklisted title. The server withholds Seerr's reason, so don't guess which one.
-   - **HTTP 409 or `duplicate_request`:** a request already exists (gate 3).
-   - **Timeout or 5xx:** the request may have been created anyway. Read `seerr_get_media` and its `openRequest` before you submit again.
+   - **`duplicate_request`:** Seerr refused it as a duplicate at the same quality (gate 3). When the message names a request number (`#N`, also `existingRequestId`), track that request with `seerr_request_status`; when it names none, as for every TV refusal, read the title's latest request with `seerr_get_media`.
+   - **`no_seasons_available`:** every requested season is already requested or available at this quality, or, for `"all"` on Seerr 3.5+, has no episodes listed yet; nothing was created (gate 4).
+   - **Timeout, 5xx, or a success answer with no request ID:** the request may have been created anyway. Read `seerr_get_media` and its `openRequest` before you submit again.
 
 ## Workflows
 
@@ -51,7 +52,7 @@ For catalog questions (what else is like X, who stars in it), a TMDB catalog ser
 
 **Request a movie or show.** Before any submit, preview with `seerr_request_media` and show the user the resolved title and year. Remakes and same-name shows are told apart by year. For a movie, if the preview carries an `existingRequest` at the same quality that is pending, approved, or failed, track that request instead of submitting (gate 3). Then submit with `mode: request` and the same arguments, and hand the resulting `created.requestId` to `seerr_request_status`.
 
-**Specific seasons, Specials, or 4K.** A preview already runs the instance's 4K, per-season, and Specials checks, so a refusal there (`four_k_not_enabled`, `partial_requests_disabled`, `special_episodes_not_enabled`) costs nothing. `"all"` never includes Specials. Seerr expands it to the numbered seasons that have episodes, so request season 0 explicitly, and only when `specialEpisodesEnabled` is true in `seerr_service_options`. Asking for seasons the user already has costs nothing, because Seerr drops them (gate 4). If every season is already covered, nothing gets created and the submit errors; confirm with `seerr_get_media` and tell the user it is already requested or available rather than reporting a new request.
+**Specific seasons, Specials, or 4K.** A preview already runs the instance's 4K, per-season, and Specials checks, so a refusal there (`four_k_not_enabled`, `partial_requests_disabled`, `special_episodes_not_enabled`) costs nothing. `"all"` requests every numbered season and never season 0, so request season 0 explicitly, and only when `specialEpisodesEnabled` is true in `seerr_service_options`. Asking for seasons the user already has costs nothing, because Seerr drops them (gate 4). If every season is already covered, nothing gets created and the submit returns `no_seasons_available`; confirm with `seerr_get_media` and tell the user it is already requested or available rather than reporting a new request. On Seerr 3.5+, `"all"` also skips seasons with no episodes listed yet, so a show that hasn't aired returns `no_seasons_available` too; when `seerr_get_media` lists 0 episodes for those seasons, tell the user there is nothing to request yet.
 
 **"Why hasn't my request shown up?"** Find the request: `seerr_get_media` for a known title, otherwise `seerr_list_requests` with `includeTitles`. Then read `seerr_request_status` and its `stateGuidance`, using the 4K track for a 4K request:
 

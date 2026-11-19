@@ -55,22 +55,23 @@ All request data is also reachable via tools — request enumeration is the job 
 ### `seerr_search_media` <sub>tool</sub>
 
 - Search titles with `mediaType: movie | tv | all`; people are excluded. `page` is 1–1000; `limit` is 1–20, default 10.
-- Returns TMDB matches and decoded `status` / `status4k` for tracked titles. Empty results return `[]` with a guidance notice.
+- Returns TMDB matches and decoded `status` / `status4k` for tracked titles. Empty results return `[]` with a guidance notice. `totalCount` is Seerr's total across movies, TV shows, and people, so it can exceed the matches returned.
 - Optional ISO 639-1 `language` selects localized titles and overviews.
 
 ---
 
 ### `seerr_get_media` <sub>tool</sub>
 
-- Availability plus any existing open request for the title (avoids duplicate requests)
+- Availability plus the title's latest request, at any quality and in any state; read its status and `is4k` before treating it as a duplicate
 - TV: omit `seasonNumber` for a per-season summary, or pass one to fetch that season's episode list (season 0 is Specials)
-- A TMDB ID that doesn't resolve surfaces as a typed `media_not_found` with a search-recovery hint (Jellyseerr's raw HTTP 500 is classified in the service layer)
+- A TMDB ID that doesn't resolve surfaces as a typed `media_not_found` with a search-recovery hint, and a season the show doesn't have as `season_not_found` with a hint to list the show's seasons and retry (Jellyseerr's raw HTTP 500 is classified in the service layer)
 
 ---
 
 ### `seerr_list_requests` <sub>tool</sub>
 
 - Filter by lifecycle `filter`, `mediaType`, and `requestedById`; sort by `added` or `modified`, ascending or descending. `take` is 1–100, default 20; `skip` selects the offset.
+- Version limits: `sortDirection: asc` needs Seerr or Jellyseerr 2.2+, and `mediaType` `movie` or `tv` needs Seerr or Jellyseerr 2.6+. An instance that rejects the query returns `unsupported_filter` with a recovery hint.
 - Returns decoded statuses, requester `{ id, displayName }`, and an enrichment trailer with applied filters.
 - `includeTitles: true` joins media titles once per distinct title (default off); unresolved rows retain their data and are disclosed in the notice.
 
@@ -79,7 +80,8 @@ All request data is also reachable via tools — request enumeration is the job 
 ### `seerr_request_media` <sub>tool</sub>
 
 - **Guarded write.** `mode: preview` (default) returns the resolved title and exact `POST /request` payload without writing. `mode: request` asks for confirmation bound to the same caller, title and payload; declined, cancelled or invalid answers return `request_cancelled`.
-- TV requests require `seasons: "all"` or a list such as `[1, 2]`; season 0 (Specials) requires special episodes to be enabled. Instance capability checks run before any POST; existing requests appear in output and duplicate rejections return `duplicate_request`.
+- TV requests require `seasons: "all"` (every numbered season, never season 0) or a list such as `[1, 2]`; season 0 (Specials) must be listed explicitly and requires special episodes to be enabled. Instance capability checks run before any POST.
+- The title's latest request, at any quality and in any state, appears as `existingRequest`. A same-quality duplicate returns `duplicate_request` (with `existingRequestId` when the blocker is a movie's first request at that quality); a request whose seasons are all already requested or available (or, for `"all"` on Seerr 3.5+, have no episodes listed yet) creates nothing and returns `no_seasons_available`.
 - Optional routing overrides: `serverId`, `profileId`, `rootFolder`, `languageProfileId`. Omit them to use Jellyseerr's defaults.
 
 ---
@@ -175,7 +177,7 @@ MCP_TRANSPORT_TYPE=http MCP_HTTP_PORT=3010 SEERR_BASE_URL=http://localhost:5055 
 
 ### Prerequisites
 
-- [Bun v1.4.0](https://bun.sh/) or higher (or Node.js v24+).
+- [Bun v1.4.4](https://bun.sh/) or higher (or Node.js v24+).
 - A running Jellyseerr or Overseerr instance, and its API key (Settings → General → API Key).
 
 ### Installation

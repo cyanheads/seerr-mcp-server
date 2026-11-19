@@ -14,6 +14,7 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
+import { escapeMarkdownHeading } from '@/mcp-server/tools/escape-markdown-heading.js';
 import { projectRequestDetail } from '@/services/seerr/normalizers.js';
 import { getSeerrService } from '@/services/seerr/seerr-service.js';
 import { StatusRef, statusText } from '@/services/seerr/status.js';
@@ -101,7 +102,7 @@ export const requestStatusTool = tool('seerr_request_status', {
   format: (result) => {
     const lines: string[] = [];
     lines.push(
-      `# Request #${result.requestId} — ${result.title !== undefined ? escapeMarkdownInline(result.title) : 'Untitled'} (${result.mediaType}, 4K=${result.is4k})`,
+      `# Request #${result.requestId} — ${result.title !== undefined ? escapeMarkdownHeading(result.title) : 'Untitled'} (${result.mediaType}, 4K=${result.is4k})`,
     );
     lines.push(`**TMDB ID:** ${result.tmdbId ?? 'n/a'}`);
 

@@ -2,14 +2,16 @@
  * @fileoverview Tests for seerr_request_status. Headline: track one request — decoded
  * request + media status, redacted requester, routing (no paths), and a state-tuned
  * hint. Covers: full projection, profileName-null routing, stateGuidance derivation,
- * modifiedBy redaction, unflagged title hydration (and its degrade modes), and the
- * request_not_found contract bubbling.
+ * modifiedBy redaction, unflagged title hydration (and its degrade modes), the
+ * title heading read back through a CommonMark parse, and the request_not_found
+ * contract bubbling.
  * @module tests/tools/request-status.tool.test
  */
 
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { readHeadings } from '../helpers/commonmark.js';
 
 const service = { getRequest: vi.fn(), getMovie: vi.fn(), getTv: vi.fn() };
 
@@ -168,6 +170,24 @@ describe('seerr_request_status', () => {
       ctx,
     );
     expect(result.title).toBe('Game of Thrones');
+  });
+
+  it('keeps a joined title holding a line break in its one heading', async () => {
+    service.getRequest.mockResolvedValue({
+      id: 47,
+      type: 'movie',
+      status: 2,
+      media: { tmdbId: 299534, status: 3 },
+    });
+    service.getMovie.mockResolvedValue({ id: 299534, title: 'Line\nBreak' });
+    const ctx = createMockContext({ tenantId: 'test', errors: requestStatusTool.errors });
+    const result = await requestStatusTool.handler(
+      requestStatusTool.input.parse({ requestId: 47 }),
+      ctx,
+    );
+
+    const text = (requestStatusTool.format!(result)[0] as { text: string }).text;
+    expect(readHeadings(text)).toEqual(['Request #47 — Line\nBreak (movie, 4K=false)']);
   });
 
   it('degrades to no title when the media lookup fails, keeping every other field', async () => {
